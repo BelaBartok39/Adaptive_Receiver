@@ -67,8 +67,9 @@ class AdaptiveReceiverGUI:
             'error': deque(maxlen=500),
             'threshold': deque(maxlen=500),
             'detections': deque(maxlen=500),
-            'i_constellation': deque(maxlen=1000),
-            'q_constellation': deque(maxlen=1000),
+            # Reduce constellation points for performance
+            'i_constellation': deque(maxlen=200),
+            'q_constellation': deque(maxlen=200),
             # Spectral data
             'spec_freqs': None,
             'spec_psd': None
@@ -140,9 +141,13 @@ class AdaptiveReceiverGUI:
                 current_time = self.detector.sample_count
                 self.plot_data['time'].append(current_time)
                 self.plot_data['error'].append(error)
-                threshold = self.detector.threshold_manager.get_threshold()
-                if threshold == float('inf'):
-                    threshold = error * 2
+                # Use actual adaptive threshold
+                # Freeze threshold after learning using stable_threshold to allow crossings
+                manager = self.detector.threshold_manager
+                if not self.detector.is_learning and manager.stable_threshold is not None:
+                    threshold = manager.stable_threshold
+                else:
+                    threshold = manager.get_threshold()
                 self.plot_data['threshold'].append(threshold)
                 self.plot_data['detections'].append(is_jammed)
                 # Update constellation using snapshot
@@ -304,6 +309,8 @@ class AdaptiveReceiverGUI:
     
     def _process_window(self):
         """Process a window of I/Q samples (only used when not using SimpleJammingDetector)."""
+        # Ensure metrics variable is always defined
+        metrics = {}
         try:
             # Get processing window
             i_array = np.array(self.i_buffer[:self.detector.window_size])
@@ -324,7 +331,12 @@ class AdaptiveReceiverGUI:
             self.plot_data['time'].append(current_time)
             self.plot_data['error'].append(error)
             
-            threshold = self.detector.threshold_manager.get_threshold()
+            # Freeze threshold after learning for detection crossings
+            manager = self.detector.threshold_manager
+            if not self.detector.is_learning and manager.stable_threshold is not None:
+                threshold = manager.stable_threshold
+            else:
+                threshold = manager.get_threshold()
             if threshold == float('inf'):
                 threshold = error * 2  # For display purposes during learning
             self.plot_data['threshold'].append(threshold)

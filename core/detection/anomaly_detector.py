@@ -173,13 +173,11 @@ class AnomalyDetector:
         self.detection_history.append({
             'timestamp': time.time(),
             'error': error,
-            'is_anomaly': is_anomaly,
             'confidence': confidence
         })
         # Store last detection results for external uses
         self.last_is_anomaly = is_anomaly
         self.last_error = error
-        self.last_metrics = metrics
         
         self.feature_history.append({
             **spectral_features,
@@ -193,8 +191,7 @@ class AnomalyDetector:
             if (len(self.batch_buffer) >= self.config['training']['batch_size'] and 
                 self.sample_count % self.config['training']['update_interval'] == 0):
                 self._update_model_batch()
-        
-        # Compile metrics
+        # Compile return metrics including extracted features
         metrics = {
             'error': error,
             'mse_error': mse_error.item(),

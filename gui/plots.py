@@ -62,7 +62,7 @@ class PlotManager:
         
         # Plot update control
         self.update_counter = 0
-        self.update_interval = 1  # Update every call for immediate feedback
+        self.update_interval = 5  # Update every 5 calls to balance performance
     
     def setup_plots(self):
         """Initialize all plots with proper formatting."""
@@ -289,12 +289,11 @@ class PlotManager:
     def start_animation(self):
         """Start the plot animation."""
         if self.animation is None:
+            # Use blit for smoother, faster redraws
             self.animation = FuncAnimation(
                 self.fig, self.update_plots,
-                interval=200, blit=False, cache_frame_data=False
+                interval=200, blit=True, cache_frame_data=False
             )
-            # Initial draw to display plot area
-            self.canvas.draw()
     
     def stop_animation(self):
         """Stop the plot animation."""
