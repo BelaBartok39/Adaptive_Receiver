@@ -9,12 +9,14 @@ import struct
 import threading
 import time
 from pathlib import Path
+from typing import Dict
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
 from core.detection.anomaly_detector import AnomalyDetector
 from core.preprocessing.signal_filters import SignalPreprocessor
+from config.config_loader import load_detector_config, load_network_config, load_signal_config
 
 
 class SimpleJammingDetector:
@@ -22,49 +24,49 @@ class SimpleJammingDetector:
     Simplified jamming detector using the modular components.
     """
     
-    def __init__(self, port: int = 12345, window_size: int = 1024):
+    def __init__(self, port: int = None, window_size: int = None):
         """
         Initialize the detector.
         
         Args:
-            port: UDP port to listen on
-            window_size: Size of processing windows
+            port: UDP port to listen on (overrides config)
+            window_size: Size of processing windows (overrides config)
         """
-        self.port = port
-        self.window_size = window_size
+        # Load configurations
+        self.network_config = load_network_config()
+        self.signal_config = load_signal_config()
+        self.detector_config = load_detector_config()
+        
+        # Use provided values or fall back to config
+        self.port = port if port is not None else self.network_config.get('udp_port', 12345)
+        self.window_size = window_size if window_size is not None else self.signal_config.get('window_size', 1024)
         self.running = False
         
-        # Initialize detector with custom config
-        config = {
-            'model': {'latent_dim': 32},
-            'training': {
-                'learning_rate': 0.001,
-                'batch_size': 16,
-                'update_interval': 100
-            },
-            'threshold': {
-                'base_percentile': 99.0,
-                'safety_margin': 1.5
-            }
-        }
+        print(f"Loading configuration:")
+        print(f"  - Port: {self.port}")
+        print(f"  - Window size: {self.window_size}")
+        print(f"  - Model latent dim: {self.detector_config['model']['latent_dim']}")
+        print(f"  - Learning rate: {self.detector_config['training']['learning_rate']}")
         
         self.detector = AnomalyDetector(
-            window_size=window_size,
-            config=config
+            window_size=self.window_size,
+            config=self.detector_config
         )
         
         # Setup UDP socket
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.bind(('0.0.0.0', port))
-        self.socket.settimeout(0.1)
+        self.socket.bind(('0.0.0.0', self.port))
+        self.socket.settimeout(self.network_config.get('timeout', 0.1))
         
         # Data buffers
         self.i_buffer = []
         self.q_buffer = []
         self.last_timestamp = 0
         
-        print(f"Detector initialized on port {port}")
+        print(f"Detector initialized on port {self.port}")
         print(f"Using device: {self.detector.device}")
+        print(f"Buffer size: {self.network_config.get('buffer_size', 65536)}")
+        print(f"Preprocessing: {self.detector_config['preprocessing']['normalization']} normalization")
     
     def start(self):
         """Start the detection system."""
@@ -108,9 +110,11 @@ class SimpleJammingDetector:
     
     def _receive_loop(self):
         """Receive and process UDP packets."""
+        buffer_size = self.network_config.get('buffer_size', 65536)
+        
         while self.running:
             try:
-                data, addr = self.socket.recvfrom(65536)
+                data, addr = self.socket.recvfrom(buffer_size)
                 
                 if len(data) < 20:
                     continue
@@ -211,19 +215,31 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='Simple RF Jamming Detector')
-    parser.add_argument('--port', type=int, default=12345, 
-                       help='UDP port to listen on')
-    parser.add_argument('--window', type=int, default=1024,
-                       help='Window size for processing')
+    parser.add_argument('--port', type=int, default=None, 
+                       help='UDP port to listen on (overrides config)')
+    parser.add_argument('--window', type=int, default=None,
+                       help='Window size for processing (overrides config)')
+    parser.add_argument('--config-dir', type=str, default=None,
+                       help='Configuration directory path')
     args = parser.parse_args()
     
-    detector = SimpleJammingDetector(port=args.port, window_size=args.window)
-    
     try:
+        # Initialize detector with config-based settings
+        detector = SimpleJammingDetector(port=args.port, window_size=args.window)
+        
+        print("\nStarting RF Jamming Detector...")
+        print("Press Ctrl+C to stop")
+        print("-" * 50)
+        
         detector.start()
+        
+    except FileNotFoundError as e:
+        print(f"Configuration file not found: {e}")
+        print("Make sure you're running from the correct directory with config files.")
     except Exception as e:
         print(f"Error: {e}")
-        detector.stop()
+        if 'detector' in locals():
+            detector.stop()
 
 
 if __name__ == "__main__":

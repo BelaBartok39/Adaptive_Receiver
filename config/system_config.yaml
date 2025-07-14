@@ -1,12 +1,45 @@
-# System configuration
+# System Configuration for Adaptive RF Receiver
+# This file contains system-level settings for the RF anomaly detection system
 
-system:
-  device: cuda
-  window_size: 1024
-  
+# Network settings
 network:
   udp_port: 12345
   buffer_size: 65536
+  timeout: 0.1
+  bind_address: "0.0.0.0"
+
+# Signal processing settings
+signal:
+  window_size: 1024
+  sample_rate: 2048000  # 2 MHz default
+  center_frequency: 915000000  # 915 MHz default
+  
+# Device settings
+device:
+  auto_select: true
+  preferred: "cuda"  # cuda, cpu, or auto
+  use_half_precision: true  # Use FP16 on CUDA devices
+  
+# Logging settings
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  file: "adaptive_receiver.log"
+  console: true
+  max_file_size: "10MB"
+  backup_count: 5
+
+# File paths
+paths:
+  model_dir: "models"
+  data_dir: "data"
+  config_dir: "config"
+  log_dir: "logs"
+  
+# Performance settings
+performance:
+  max_threads: 4
+  memory_limit: "1GB"
+  batch_processing: true
   
 detection:
   learning_duration: 60

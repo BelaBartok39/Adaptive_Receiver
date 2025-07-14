@@ -1,1 +1,80 @@
-# Model configuration
+# Model Configuration for Adaptive RF Receiver
+# This file contains ML model and training parameters
+
+# Autoencoder model settings
+model:
+  latent_dim: 32
+  input_channels: 2  # I and Q channels
+  hidden_dims: [64, 128, 256]
+  activation: "relu"
+  dropout_rate: 0.1
+  batch_norm: true
+  use_residual: true
+
+# Training parameters
+training:
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  batch_size: 16
+  batch_buffer_size: 32
+  update_interval: 100
+  max_epochs: 1000
+  early_stopping_patience: 50
+  lr_scheduler:
+    type: "ReduceLROnPlateau"
+    factor: 0.5
+    patience: 10
+    min_lr: 1e-6
+  
+# Dynamic threshold management
+threshold:
+  window_size: 1000
+  base_percentile: 99.0
+  adaptation_rate: 0.01
+  min_samples: 100
+  ema_alpha: 0.05
+  safety_margin: 1.5
+  min_threshold_ratio: 0.8
+  max_threshold_ratio: 3.0
+  
+# Signal preprocessing
+preprocessing:
+  normalization: "robust"  # Options: standard, robust, minmax
+  clip_sigma: 5.0
+  filter_order: 4
+  highpass_cutoff: 0.01  # Normalized frequency
+  lowpass_cutoff: 0.49   # Normalized frequency
+  apply_windowing: true
+  window_type: "hann"
+  
+# Deep Residual Network (DRN) for jammer classification
+drn:
+  num_classes: 6  # Number of jammer types
+  depth: 50
+  width_multiplier: 1.0
+  dropout_rate: 0.2
+  use_attention: true
+  
+# RF-PUF (Physical Unclonable Function) settings
+rf_puf:
+  enabled: false
+  challenge_length: 64
+  response_length: 64
+  tolerance: 0.1
+  
+# Detection parameters
+detection:
+  confidence_threshold: 0.8
+  min_detection_interval: 0.1  # seconds
+  max_detections_per_second: 10
+  
+# Channel scanning settings
+channel_scan:
+  enabled: true
+  scan_range: [902e6, 928e6]  # ISM band
+  step_size: 0.5e6
+  dwell_time: 0.1  # seconds per channel
+  quality_threshold: 0.7
+  history_size: 100
+  min_switch_interval: 5.0  # seconds
+  hysteresis_factor: 0.9

@@ -27,7 +27,7 @@ class AnomalyDetector:
     def __init__(self, 
                  window_size: int = 1024,
                  device: Optional[str] = None,
-                 config: Optional[Dict] = None):
+                 config: Optional[dict] = None):
         """
         Initialize the anomaly detector.
         
@@ -87,7 +87,7 @@ class AnomalyDetector:
         self.model_dir = self.config.get('model_dir', 'models')
         os.makedirs(self.model_dir, exist_ok=True)
     
-    def _default_config(self) -> Dict:
+    def _default_config(self) -> dict:
         """Get default configuration."""
         return {
             'model': {
@@ -117,7 +117,7 @@ class AnomalyDetector:
         }
     
     @torch.cuda.amp.autocast()
-    def detect(self, i_data: np.ndarray, q_data: np.ndarray) -> Tuple[bool, float, Dict]:
+    def detect(self, i_data: np.ndarray, q_data: np.ndarray) -> Tuple[bool, float, dict]:
         """
         Detect anomalies in I/Q data.
         
@@ -255,7 +255,7 @@ class AnomalyDetector:
         self.learning_duration = duration
         self.threshold_manager.set_learning_mode(True)
     
-    def stop_learning(self) -> Dict:
+    def stop_learning(self) -> dict:
         """
         Stop learning phase and return statistics.
         
@@ -274,7 +274,7 @@ class AnomalyDetector:
             'threshold_stats': stats
         }
     
-    def get_status(self) -> Dict:
+    def get_status(self) -> dict:
         """
         Get current detector status.
         
