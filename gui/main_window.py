@@ -12,6 +12,7 @@ import struct
 import threading
 import time
 import datetime
+from scipy import signal
 import numpy as np
 from collections import deque
 from typing import Optional, Union
@@ -67,7 +68,10 @@ class AdaptiveReceiverGUI:
             'threshold': deque(maxlen=500),
             'detections': deque(maxlen=500),
             'i_constellation': deque(maxlen=1000),
-            'q_constellation': deque(maxlen=1000)
+            'q_constellation': deque(maxlen=1000),
+            # Spectral data
+            'spec_freqs': None,
+            'spec_psd': None
         }
         
         # IQ signal buffers (only used if we handle networking)
@@ -125,6 +129,13 @@ class AdaptiveReceiverGUI:
                 # Only update if valid
                 if is_jammed is None or error is None:
                     return
+                # Compute spectral data for spectral plot
+                try:
+                    freqs, psd = signal.periodogram(i_array + 1j * q_array, scaling='density')
+                    self.plot_data['spec_freqs'] = freqs
+                    self.plot_data['spec_psd'] = psd
+                except Exception as _:
+                    pass
                 # Update plot data
                 current_time = self.detector.sample_count
                 self.plot_data['time'].append(current_time)
@@ -301,6 +312,13 @@ class AdaptiveReceiverGUI:
             # Run detection
             is_jammed, error, metrics = self.detector.detect(i_array, q_array)
             
+            # Compute spectral data for spectral plot
+            try:
+                freqs, psd = signal.periodogram(i_array + 1j * q_array, scaling='density')
+                self.plot_data['spec_freqs'] = freqs
+                self.plot_data['spec_psd'] = psd
+            except Exception:
+                pass
             # Update plot data
             current_time = self.detector.sample_count
             self.plot_data['time'].append(current_time)

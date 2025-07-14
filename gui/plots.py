@@ -36,16 +36,19 @@ class PlotManager:
         self.fig = plt.figure(figsize=(12, 8))
         self.fig.patch.set_facecolor('white')
         
-        # Create subplot layout: 2x2 grid
-        gs = self.fig.add_gridspec(2, 2, height_ratios=[1, 1], width_ratios=[2, 1])
+        # Create subplot layout: 3 rows x 2 columns (spectral added)
+        gs = self.fig.add_gridspec(3, 2, height_ratios=[1, 1, 1], width_ratios=[2, 1])
         
         # Error and threshold plot (top left)
         self.ax_error = self.fig.add_subplot(gs[0, 0])
         
-        # Detection events (bottom left)
+        # Detection events (middle left)
         self.ax_detections = self.fig.add_subplot(gs[1, 0])
         
-        # I/Q constellation plot (right side, spanning both rows)
+        # Spectral power plot (bottom left)
+        self.ax_spectral = self.fig.add_subplot(gs[2, 0])
+        
+        # I/Q constellation plot (right side, spanning all rows)
         self.ax_constellation = self.fig.add_subplot(gs[:, 1])
         
         self.fig.tight_layout(pad=3.0)
@@ -105,6 +108,30 @@ class PlotManager:
         # Set initial limits
         self.ax_constellation.set_xlim(-4, 4)
         self.ax_constellation.set_ylim(-4, 4)
+        
+        # Spectral power plot
+        self.ax_spectral.set_title("Power Spectral Density", fontsize=12, weight='bold')
+        self.ax_spectral.set_xlabel("Frequency Bin")
+        self.ax_spectral.set_ylabel("Power")
+        self.ax_spectral.grid(True, alpha=0.3)
+        # Initial empty line
+        self.spectral_line, = self.ax_spectral.plot([], [], 'm-', linewidth=1.5)
+        
+        # Ensure layout
+        self.fig.tight_layout(pad=3.0)
+    
+    def update_spectral_plot(self):
+        """Update the spectral power plot."""
+        freqs = self.plot_data.get('spec_freqs')
+        psd = self.plot_data.get('spec_psd')
+        if freqs is None or psd is None:
+            return
+        try:
+            self.spectral_line.set_data(freqs, psd)
+            self.ax_spectral.relim()
+            self.ax_spectral.autoscale_view()
+        except Exception as e:
+            print(f"Spectral plot error: {e}")
     
     def update_plots(self, frame=None):
         """Update all plots with current data."""
@@ -118,6 +145,7 @@ class PlotManager:
             self.update_error_plot()
             self.update_detection_plot()
             self.update_constellation_plot()
+            self.update_spectral_plot()
             
             # Redraw canvas
             self.canvas.draw_idle()
