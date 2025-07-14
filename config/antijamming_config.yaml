@@ -1,0 +1,119 @@
+# Configuration for DRL-based Anti-Jamming System
+# Based on the paper parameters
+
+# System Configuration
+system:
+  rf_band: "5GHz_UNII-1"  # RF spectrum band
+  num_channels: 8         # Number of available channels
+  channel_bandwidth: 20   # MHz
+  channel_spacing: 20     # MHz between channels
+  
+  # Channel frequencies (MHz)
+  channel_frequencies:
+    - 5180
+    - 5200
+    - 5220
+    - 5240
+    - 5260
+    - 5280
+    - 5300
+    - 5320
+
+# DRL Agent Configuration
+agent:
+  type: "DDQN_PrioritizedReplay"  # Best performer from paper
+  
+  # Neural Network
+  hidden_size: 128
+  activation: "relu"
+  
+  # Training Hyperparameters (from paper Table II)
+  learning_rate: 0.001
+  discount_factor: 0.95         # γ
+  initial_epsilon: 1.0          # ζ
+  epsilon_decay: 0.005          # δ  
+  min_epsilon: 0.01             # ζ_min
+  
+  # Experience Replay
+  buffer_size: 10000            # D
+  batch_size: 32                # K
+  prioritized_alpha: 0.6        # Priority exponent
+  prioritized_beta: 0.4         # Importance sampling
+  
+  # Target Network
+  target_update_frequency: 100  # C parameter
+  
+  # Channel Switching
+  channel_switch_costs:         # Γ values to test
+    - 0.00
+    - 0.05
+    - 0.10
+    - 0.15
+
+# Training Configuration
+training:
+  num_episodes: 100             # |E|
+  steps_per_episode: 100        # |T|
+  averaging_window: 10
+  early_stopping_reward: 90     # Stop if avg reward >= 90
+  
+  # Jamming Patterns for Training
+  jamming_patterns:
+    - "constant"     # Single channel jamming
+    - "sweep"        # Sequential channel hopping
+    - "random"       # Random channel selection
+    - "dynamic"      # Mix of above patterns
+
+# Deployment Configuration  
+deployment:
+  inference_mode: "fastest"     # Options: fastest, balanced, accurate
+  update_online: false          # Continue learning during deployment
+  
+  # Performance Requirements
+  min_inference_speed: 300      # KHz (from paper)
+  max_convergence_time: 600     # seconds
+  
+  # Jetson Optimization
+  use_tensorrt: true
+  mixed_precision: true
+  cuda_streams: 2
+
+# Anomaly Detection Integration
+anomaly_detection:
+  enabled: true
+  confidence_threshold: 0.8
+  combine_with_drl: true
+  
+  # Use anomaly detector for initial jamming detection
+  # Then use DRL for channel selection
+  detection_first: true
+
+# Channel Scanning
+scanning:
+  scan_interval: 0.1           # seconds
+  energy_threshold: -80        # dBm
+  scan_all_on_detection: true  # Scan all channels when jamming detected
+  
+# Logging and Monitoring
+logging:
+  level: "INFO"
+  save_metrics: true
+  metrics_file: "antijamming_metrics.json"
+  
+  # What to log
+  log_channel_switches: true
+  log_jamming_events: true
+  log_throughput: true
+  log_agent_decisions: true
+
+# HackRF Interface (future implementation)
+hackrf:
+  enabled: false  # Set to true when ready
+  
+  # Control parameters
+  control_port: 5000
+  command_timeout: 1.0  # seconds
+  
+  # Channel switch announcement
+  csa_enabled: true
+  csa_lead_time: 0.1  # seconds before switch
