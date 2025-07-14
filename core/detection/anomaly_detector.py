@@ -169,13 +169,17 @@ class AnomalyDetector:
         if is_anomaly and not self.is_learning:
             self.total_detections += 1
         
-        # Store history
+        # Store history and last results
         self.detection_history.append({
             'timestamp': time.time(),
             'error': error,
             'is_anomaly': is_anomaly,
             'confidence': confidence
         })
+        # Store last detection results for external uses
+        self.last_is_anomaly = is_anomaly
+        self.last_error = error
+        self.last_metrics = metrics
         
         self.feature_history.append({
             **spectral_features,

@@ -127,17 +127,22 @@ class PlotManager:
     
     def update_error_plot(self):
         """Update the error and threshold plot."""
-        if not self.plot_data['time'] or not self.plot_data['error']:
+        # Ensure we have data to plot
+        if not self.plot_data['time'] or not self.plot_data['error'] or not self.plot_data['threshold']:
             return
-        
+        # Align data lengths and clamp infinities
         time_data = list(self.plot_data['time'])
         error_data = list(self.plot_data['error'])
-        threshold_data = list(self.plot_data['threshold'])
+        threshold_data = [t if t != float('inf') else float('nan') for t in self.plot_data['threshold']]
+        n = min(len(time_data), len(error_data), len(threshold_data))
+        if n == 0:
+            return
+        time_data = time_data[-n:]
+        error_data = error_data[-n:]
+        threshold_data = threshold_data[-n:]
         
-        # Update error line
+        # Update error and threshold lines with aligned data
         self.error_line.set_data(time_data, error_data)
-        
-        # Update threshold line
         self.threshold_line.set_data(time_data, threshold_data)
         
         # Auto-scale axes
@@ -155,9 +160,14 @@ class PlotManager:
         """Update the detection events plot."""
         if not self.plot_data['time'] or not self.plot_data['detections']:
             return
-        
+        # Align data lengths for detection plot
         time_data = list(self.plot_data['time'])
         detection_data = list(self.plot_data['detections'])
+        n = min(len(time_data), len(detection_data))
+        if n <= 0:
+            return
+        time_data = time_data[-n:]
+        detection_data = detection_data[-n:]
         
         # Clear previous detection markers
         self.ax_detections.clear()

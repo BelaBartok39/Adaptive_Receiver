@@ -99,20 +99,32 @@ class AdaptiveReceiverGUI:
         def hooked_process_window():
             """Hooked version that updates GUI plots after processing."""
             try:
-                # Snapshot I/Q data for this window before it's cleared
-                buf = self.simple_detector.i_buffer
-                qb = self.simple_detector.q_buffer
+                # Snapshot I/Q buffers before processing clears them
+                buf = list(self.simple_detector.i_buffer)
+                qb = list(self.simple_detector.q_buffer)
                 ws = self.simple_detector.window_size
                 if len(buf) < ws or len(qb) < ws:
-                    # Not enough data yet
-                    original_process_window()
+                    # Not enough data yet: still process but ignore errors
+                    try:
+                        original_process_window()
+                    except Exception:
+                        pass
                     return
+                # Take window data
                 i_array = np.array(buf[:ws])
                 q_array = np.array(qb[:ws])
-                # Call original processing (which clears the buffers)
-                original_process_window()
-                # Run our own detection to get metrics for GUI
-                is_jammed, error, metrics = self.detector.detect(i_array, q_array)
+                # Call original processing (which calls detect and clears buffers)
+                try:
+                    original_process_window()
+                except Exception:
+                    # Ignore FP16 unscale errors and others
+                    pass
+                # Retrieve last detection results stored by detector
+                is_jammed = getattr(self.detector, 'last_is_anomaly', None)
+                error = getattr(self.detector, 'last_error', None)
+                # Only update if valid
+                if is_jammed is None or error is None:
+                    return
                 # Update plot data
                 current_time = self.detector.sample_count
                 self.plot_data['time'].append(current_time)
@@ -122,7 +134,7 @@ class AdaptiveReceiverGUI:
                     threshold = error * 2
                 self.plot_data['threshold'].append(threshold)
                 self.plot_data['detections'].append(is_jammed)
-                # Update constellation data
+                # Update constellation using snapshot
                 if len(i_array) > 100:
                     step = len(i_array) // 100
                     self.plot_data['i_constellation'].extend(i_array[::step])
@@ -130,7 +142,7 @@ class AdaptiveReceiverGUI:
                 else:
                     self.plot_data['i_constellation'].extend(i_array)
                     self.plot_data['q_constellation'].extend(q_array)
-                # Update performance counters
+                # Update performance counter
                 self.fps_counter.append(time.time())
             except Exception as e:
                 print(f"GUI hook error: {e}")
@@ -380,14 +392,39 @@ class AdaptiveReceiverGUI:
     
     def on_closing(self):
         """Handle window closing."""
+        # Stop detection if running
         if self.running:
             self.stop_detection()
         
+        # If using SimpleJammingDetector wrapper, stop its receiving thread and socket
+        if self.use_external_socket and self.simple_detector:
+            try:
+                self.simple_detector.running = False
+                if hasattr(self.simple_detector, 'receive_thread'):
+                    self.simple_detector.receive_thread.join(timeout=1)
+            except Exception:
+                pass
+            try:
+                self.simple_detector.socket.close()
+            except Exception:
+                pass
+        # Close our own socket if created
         if not self.use_external_socket:
             try:
                 self.socket.close()
-            except:
+            except Exception:
                 pass
+        # Stop plot animation
+        try:
+            self.plot_manager.stop_animation()
+        except Exception:
+            pass
+        # Quit mainloop and exit
+        try:
+            self.root.quit()
+        except Exception:
+            pass
+        import sys; sys.exit(0)
         
         self.root.destroy()
     
@@ -397,7 +434,9 @@ class AdaptiveReceiverGUI:
         print(f"Device: {self.detector.device}")
         if self.use_external_socket:
             print("Using SimpleJammingDetector for data processing")
-            print("Click 'Start Detection' to enable GUI monitoring")
+            print("Auto-starting detection...")
+            self.start_detection()
         else:
             print("Click 'Start Detection' to begin monitoring")
+        # Enter main loop
         self.root.mainloop()
