@@ -253,7 +253,10 @@ def main():
                 detector.receive_thread = threading.Thread(target=detector._receive_loop, daemon=True)
                 detector.receive_thread.start()
                 
-                # Start the GUI
+                # Automatically start GUI detection
+                gui.start_detection()
+                
+                # Start the GUI main loop
                 gui.run()
                 
             except ImportError as e:

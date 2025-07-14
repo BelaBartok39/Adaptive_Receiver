@@ -44,8 +44,9 @@ class StatusPanel(ttk.LabelFrame):
         except Exception as e:
             self.status_label.config(text="Error", foreground='red')
         
-        # Schedule next update
-        self.after(1000, self.update_status)
+        # Schedule next update if panel still exists
+        if self.winfo_exists():
+            self.after(1000, self.update_status)
 
 
 class ControlPanel(ttk.LabelFrame):
@@ -96,17 +97,18 @@ class ControlPanel(ttk.LabelFrame):
         duration = 60  # Could be made configurable
         if hasattr(self.gui, 'simple_detector') and self.gui.simple_detector:
             # Using SimpleJammingDetector - start its learning
-            print("Starting 60-second learning phase...")
-            self.gui.simple_detector.detector.start_learning_phase(duration)
+            print(f"Starting {duration}-second learning phase...")
+            # Use unified method naming
+            self.gui.simple_detector.detector.start_learning(duration)
             self.on_learning_started(duration)
             
             # Schedule learning end
             def end_learning():
-                message = self.gui.simple_detector.detector.stop_learning_phase()
+                message = self.gui.simple_detector.detector.stop_learning()
                 self.on_learning_stopped()
                 import tkinter.messagebox
                 tkinter.messagebox.showinfo("Learning Complete", message)
-                
+            
             self.gui.root.after(duration * 1000, end_learning)
         else:
             # Direct detector access
@@ -190,8 +192,9 @@ class StatisticsPanel(ttk.LabelFrame):
         except Exception as e:
             print(f"Statistics update error: {e}")
         
-        # Schedule next update
-        self.after(1000, self.update_statistics)
+        # Schedule next update if panel still exists
+        if self.winfo_exists():
+            self.after(1000, self.update_statistics)
     
     def _create_tooltip(self, widget, text):
         """Create a simple tooltip for a widget."""

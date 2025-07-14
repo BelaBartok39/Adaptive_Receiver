@@ -95,49 +95,47 @@ class AdaptiveReceiverGUI:
         """Hook into SimpleJammingDetector's processing pipeline."""
         # Store original process_window method
         original_process_window = self.simple_detector._process_window
-        
+
         def hooked_process_window():
-            """Hooked version that updates GUI plots."""
+            """Hooked version that updates GUI plots after processing."""
             try:
-                # Call original processing
+                # Snapshot I/Q data for this window before it's cleared
+                buf = self.simple_detector.i_buffer
+                qb = self.simple_detector.q_buffer
+                ws = self.simple_detector.window_size
+                if len(buf) < ws or len(qb) < ws:
+                    # Not enough data yet
+                    original_process_window()
+                    return
+                i_array = np.array(buf[:ws])
+                q_array = np.array(qb[:ws])
+                # Call original processing (which clears the buffers)
                 original_process_window()
-                
-                # Update GUI with the processed data
-                if len(self.simple_detector.i_buffer) >= self.simple_detector.window_size:
-                    # Get the data that was just processed
-                    i_array = np.array(self.simple_detector.i_buffer[:self.simple_detector.window_size])
-                    q_array = np.array(self.simple_detector.q_buffer[:self.simple_detector.window_size])
-                    
-                    # Run our own detection to get metrics for GUI
-                    is_jammed, error, metrics = self.detector.detect(i_array, q_array)
-                    
-                    # Update plot data
-                    current_time = self.detector.sample_count
-                    self.plot_data['time'].append(current_time)
-                    self.plot_data['error'].append(error)
-                    
-                    threshold = self.detector.threshold_manager.get_threshold()
-                    if threshold == float('inf'):
-                        threshold = error * 2  # For display purposes during learning
-                    self.plot_data['threshold'].append(threshold)
-                    self.plot_data['detections'].append(is_jammed)
-                    
-                    # Update constellation data (subsample for performance)
-                    if len(i_array) > 100:
-                        step = len(i_array) // 100
-                        self.plot_data['i_constellation'].extend(i_array[::step])
-                        self.plot_data['q_constellation'].extend(q_array[::step])
-                    else:
-                        self.plot_data['i_constellation'].extend(i_array)
-                        self.plot_data['q_constellation'].extend(q_array)
-                    
-                    # Update performance counters
-                    self.fps_counter.append(time.time())
-                    
+                # Run our own detection to get metrics for GUI
+                is_jammed, error, metrics = self.detector.detect(i_array, q_array)
+                # Update plot data
+                current_time = self.detector.sample_count
+                self.plot_data['time'].append(current_time)
+                self.plot_data['error'].append(error)
+                threshold = self.detector.threshold_manager.get_threshold()
+                if threshold == float('inf'):
+                    threshold = error * 2
+                self.plot_data['threshold'].append(threshold)
+                self.plot_data['detections'].append(is_jammed)
+                # Update constellation data
+                if len(i_array) > 100:
+                    step = len(i_array) // 100
+                    self.plot_data['i_constellation'].extend(i_array[::step])
+                    self.plot_data['q_constellation'].extend(q_array[::step])
+                else:
+                    self.plot_data['i_constellation'].extend(i_array)
+                    self.plot_data['q_constellation'].extend(q_array)
+                # Update performance counters
+                self.fps_counter.append(time.time())
             except Exception as e:
                 print(f"GUI hook error: {e}")
-        
-        # Replace the method
+
+        # Replace the method on the simple_detector
         self.simple_detector._process_window = hooked_process_window
     
     def setup_gui(self):
@@ -196,20 +194,20 @@ class AdaptiveReceiverGUI:
     def start_learning(self, duration: int = 60):
         """Start learning phase."""
         if self.use_external_socket:
-            # Use SimpleJammingDetector's method
-            self.simple_detector.detector.start_learning_phase(duration)
+            # Use SimpleJammingDetector's detector
+            self.simple_detector.detector.start_learning(duration)
         else:
-            # Use direct detector method
-            self.detector.start_learning_phase(duration)
+            # Use direct detector
+            self.detector.start_learning(duration)
             
         self.control_panel.on_learning_started(duration)
         
         # Schedule learning end
         def end_learning():
             if self.use_external_socket:
-                message = self.simple_detector.detector.stop_learning_phase()
+                message = self.simple_detector.detector.stop_learning()
             else:
-                message = self.detector.stop_learning_phase()
+                message = self.detector.stop_learning()
             self.control_panel.on_learning_stopped()
             tkinter.messagebox.showinfo("Learning Complete", message)
             
