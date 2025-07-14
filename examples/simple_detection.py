@@ -221,6 +221,10 @@ def main():
                        help='Window size for processing (overrides config)')
     parser.add_argument('--config-dir', type=str, default=None,
                        help='Configuration directory path')
+    parser.add_argument('--gui', action='store_true',
+                       help='Launch with graphical interface')
+    parser.add_argument('--no-gui', action='store_true',
+                       help='Force command-line interface only')
     args = parser.parse_args()
     
     try:
@@ -231,7 +235,34 @@ def main():
         print("Press Ctrl+C to stop")
         print("-" * 50)
         
-        detector.start()
+        # Choose interface mode
+        if args.gui and not args.no_gui:
+            # Launch GUI
+            try:
+                from gui.main_window import AdaptiveReceiverGUI
+                
+                print("Launching GUI interface...")
+                # Pass the SimpleJammingDetector instance to the GUI
+                gui = AdaptiveReceiverGUI(
+                    detector,  # Pass the whole SimpleJammingDetector instance
+                    window_title="Simple RF Jamming Detector"
+                )
+                
+                # Start the detector's background processing
+                detector.running = True
+                detector.receive_thread = threading.Thread(target=detector._receive_loop, daemon=True)
+                detector.receive_thread.start()
+                
+                # Start the GUI
+                gui.run()
+                
+            except ImportError as e:
+                print(f"GUI not available: {e}")
+                print("Falling back to command-line interface...")
+                detector.start()
+        else:
+            # Command-line interface
+            detector.start()
         
     except FileNotFoundError as e:
         print(f"Configuration file not found: {e}")
