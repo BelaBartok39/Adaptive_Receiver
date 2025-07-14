@@ -1,0 +1,23 @@
+# System configuration
+
+system:
+  device: cuda
+  window_size: 1024
+  
+network:
+  udp_port: 12345
+  buffer_size: 65536
+  
+detection:
+  learning_duration: 60
+  update_interval: 100
+  threshold_percentile: 99.0
+  
+gui:
+  update_rate: 10  # Hz
+  plot_history: 500
+  
+channels:
+  current: 2412  # MHz
+  alternatives: [2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457, 2462]
+  scan_bandwidth: 20  # MHz
