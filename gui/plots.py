@@ -139,19 +139,20 @@ class PlotManager:
         
         # Skip updates for performance (update every N calls)
         if self.update_counter % self.update_interval != 0:
-            return
+            return []
         
         try:
             self.update_error_plot()
             self.update_detection_plot()
             self.update_constellation_plot()
             self.update_spectral_plot()
-            
             # Redraw canvas
             self.canvas.draw_idle()
-            
+            # Return empty list of artists
+            return []
         except Exception as e:
             print(f"Plot update error: {e}")
+            return []
     
     def update_error_plot(self):
         """Update the error and threshold plot."""
@@ -289,10 +290,10 @@ class PlotManager:
     def start_animation(self):
         """Start the plot animation."""
         if self.animation is None:
-            # Use blit for smoother, faster redraws
+            # Start animation without blitting to avoid returning Artist objects
             self.animation = FuncAnimation(
                 self.fig, self.update_plots,
-                interval=200, blit=True, cache_frame_data=False
+                interval=200, blit=False, cache_frame_data=False
             )
     
     def stop_animation(self):
