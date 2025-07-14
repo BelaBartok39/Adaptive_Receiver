@@ -188,13 +188,23 @@ class SignalPreprocessor:
         # Power spectral density
         freqs, psd = signal.periodogram(complex_signal, scaling='density')
         
+        # Normalize PSD
+        psd_norm = psd / (np.sum(psd) + 1e-10)
+        
+        # Calculate features step by step
+        peak_frequency = freqs[np.argmax(psd)]
+        spectral_centroid = np.sum(freqs * psd_norm)
+        spectral_bandwidth = np.sqrt(np.sum(((freqs - spectral_centroid) ** 2) * psd_norm))
+        spectral_energy = np.sum(psd)
+        spectral_entropy = -np.sum(psd_norm * np.log2(psd_norm + 1e-10))
+        
         # Extract features
         features = {
-            'peak_frequency': freqs[np.argmax(psd)],
-            'spectral_centroid': np.sum(freqs * psd) / np.sum(psd),
-            'spectral_bandwidth': np.sqrt(np.sum(((freqs - features['spectral_centroid']) ** 2) * psd) / np.sum(psd)),
-            'spectral_energy': np.sum(psd),
-            'spectral_entropy': -np.sum(psd * np.log2(psd + 1e-10))
+            'peak_frequency': float(peak_frequency),
+            'spectral_centroid': float(spectral_centroid),
+            'spectral_bandwidth': float(spectral_bandwidth),
+            'spectral_energy': float(spectral_energy),
+            'spectral_entropy': float(spectral_entropy)
         }
         
         return features

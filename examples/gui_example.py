@@ -60,7 +60,7 @@ def main():
         # Create and run GUI
         print("Starting GUI...")
         gui = AdaptiveReceiverGUI(
-            detector=detector,
+            detector_or_wrapper=detector,
             port=port,
             window_title="Adaptive RF Receiver - Full GUI"
         )

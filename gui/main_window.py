@@ -619,10 +619,12 @@ class AdaptiveReceiverGUI:
         if self.running:
             self.stop_detection()
         
-        try:
-            self.socket.close()
-        except:
-            pass
+        # Only close socket if we created it (not using SimpleJammingDetector)
+        if not self.use_external_socket:
+            try:
+                self.socket.close()
+            except:
+                pass
         
         self.root.destroy()
     
