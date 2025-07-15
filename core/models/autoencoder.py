@@ -1,32 +1,37 @@
 """
 Improved RF Autoencoder for anomaly detection.
 Optimized for Jetson deployment with mixed precision support.
+Based on VAE architecture from "Jamming Detection in MIMO-OFDM ISAC Systems Using Variational Autoencoders"
 """
 
 import torch
 import torch.nn as nn
-from typing import Tuple, Optional
+import torch.nn.functional as F
+from typing import Tuple, Optional, Dict
+import numpy as np
 
 
 class ImprovedRFAutoencoder(nn.Module):
     """
-    Autoencoder with residual connections and attention mechanisms.
+    Variational Autoencoder with residual connections and attention mechanisms.
     
     This model is designed to learn normal RF signal patterns and detect
     anomalies through reconstruction error analysis.
     """
     
-    def __init__(self, input_size: int = 1024, latent_dim: int = 32):
+    def __init__(self, input_size: int = 1024, latent_dim: int = 32, beta: float = 1.0):
         """
-        Initialize the autoencoder.
+        Initialize the VAE.
         
         Args:
             input_size: Size of input signal window
             latent_dim: Dimension of latent representation
+            beta: Weight for KL divergence term (beta-VAE)
         """
         super().__init__()
         self.input_size = input_size
         self.latent_dim = latent_dim
+        self.beta = beta
         
         # Encoder layers
         self.encoder = self._build_encoder()
@@ -34,9 +39,11 @@ class ImprovedRFAutoencoder(nn.Module):
         # Attention mechanism
         self.attention = self._build_attention()
         
-        # Variational bottleneck: separate layers for mu and logvar
+        # Variational layers
         self.pool = nn.AdaptiveAvgPool1d(8)
         self.flatten = nn.Flatten()
+        
+        # Separate layers for mean and log variance
         self.mu_fc = nn.Linear(128 * 8, latent_dim)
         self.logvar_fc = nn.Linear(128 * 8, latent_dim)
         
@@ -99,15 +106,30 @@ class ImprovedRFAutoencoder(nn.Module):
             )
         })
     
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through the autoencoder.
+        Reparameterization trick for VAE.
+        
+        Args:
+            mu: Mean of latent distribution
+            logvar: Log variance of latent distribution
+            
+        Returns:
+            Sampled latent vector
+        """
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    
+    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Encode input to latent distribution parameters.
         
         Args:
             x: Input tensor of shape (batch, 2, input_size)
             
         Returns:
-            Tuple of (reconstruction, latent_representation)
+            Tuple of (mu, logvar)
         """
         # Encoder with residual connections
         e1 = self.encoder['conv1'](x)
@@ -118,130 +140,100 @@ class ImprovedRFAutoencoder(nn.Module):
         att_weights = self.attention(e3).unsqueeze(2)
         e3_attended = e3 * att_weights
         
-        # Bottleneck (VAE): compute mu and logvar, then sample z
+        # Pool and flatten
         pooled = self.pool(e3_attended)
         flat = self.flatten(pooled)
+        
+        # Get distribution parameters
         mu = self.mu_fc(flat)
         logvar = self.logvar_fc(flat)
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        z = mu + eps * std
-        # store for KL loss
-        self.mu = mu
-        self.logvar = logvar
         
+        return mu, logvar
+    
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Decode latent vector to reconstruction.
+        
+        Args:
+            z: Latent vector
+            
+        Returns:
+            Reconstructed signal
+        """
         # Decoder
         d = self.decoder_fc(z)
         d1 = self.decoder['conv1'](d)
         d2 = self.decoder['conv2'](d1)
         reconstruction = self.decoder['conv3'](d2)
         
-        return reconstruction, z
+        return reconstruction
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass through the VAE.
+        
+        Args:
+            x: Input tensor of shape (batch, 2, input_size)
+            
+        Returns:
+            Tuple of (reconstruction, mu, logvar)
+        """
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        reconstruction = self.decode(z)
+        
+        return reconstruction, mu, logvar
+    
+    def loss_function(self, x: torch.Tensor, reconstruction: torch.Tensor, 
+                     mu: torch.Tensor, logvar: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Calculate VAE loss with reconstruction and KL divergence terms.
+        
+        Args:
+            x: Original input
+            reconstruction: Reconstructed input
+            mu: Mean of latent distribution
+            logvar: Log variance of latent distribution
+            
+        Returns:
+            Dictionary with loss components
+        """
+        # Reconstruction loss (MSE)
+        recon_loss = F.mse_loss(reconstruction, x, reduction='mean')
+        
+        # KL divergence loss
+        kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        
+        # Total loss with beta weighting
+        total_loss = recon_loss + self.beta * kl_loss
+        
+        return {
+            'loss': total_loss,
+            'recon_loss': recon_loss,
+            'kl_loss': kl_loss
+        }
     
     @torch.jit.export
-    def get_latent(self, x: torch.Tensor) -> torch.Tensor:
+    def get_anomaly_score(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Get only the latent representation.
+        Calculate anomaly score based on reconstruction probability.
         
         Args:
             x: Input tensor
             
         Returns:
-            Latent representation
+            Anomaly score
         """
-        e1 = self.encoder['conv1'](x)
-        e2 = self.encoder['conv2'](e1)
-        e3 = self.encoder['conv3'](e2)
-        
-        att_weights = self.attention(e3).unsqueeze(2)
-        e3_attended = e3 * att_weights
-        
-        return self.encoder_fc(e3_attended)
-    
-    def freeze_encoder(self) -> None:
-        """Freeze encoder weights for fine-tuning."""
-        for param in self.encoder.parameters():
-            param.requires_grad = False
-        for param in self.attention.parameters():
-            param.requires_grad = False
-        for param in self.encoder_fc.parameters():
-            param.requires_grad = False
-    
-    def unfreeze_encoder(self) -> None:
-        """Unfreeze encoder weights."""
-        for param in self.encoder.parameters():
-            param.requires_grad = True
-        for param in self.attention.parameters():
-            param.requires_grad = True
-        for param in self.encoder_fc.parameters():
-            param.requires_grad = True
-
-
-class AutoencoderWithRFPUF(ImprovedRFAutoencoder):
-    """
-    Extended autoencoder that incorporates RF-PUF concepts.
-    
-    This model can learn device-specific signatures similar to the
-    RF-PUF paper, enabling both anomaly detection and device authentication.
-    """
-    
-    def __init__(self, input_size: int = 1024, latent_dim: int = 32, 
-                 n_devices: Optional[int] = None):
-        """
-        Initialize autoencoder with RF-PUF capabilities.
-        
-        Args:
-            input_size: Size of input signal window
-            latent_dim: Dimension of latent representation
-            n_devices: Number of devices for authentication (optional)
-        """
-        super().__init__(input_size, latent_dim)
-        
-        # Additional layers for device signature extraction
-        self.signature_extractor = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim * 2),
-            nn.ReLU(),
-            nn.Linear(latent_dim * 2, latent_dim),
-            nn.Tanh()
-        )
-        
-        # Optional device classifier (for RF-PUF mode)
-        self.device_classifier = None
-        if n_devices is not None:
-            self.device_classifier = nn.Sequential(
-                nn.Linear(latent_dim, latent_dim * 2),
-                nn.ReLU(),
-                nn.Dropout(0.5),
-                nn.Linear(latent_dim * 2, n_devices)
-            )
-    
-    def extract_signature(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Extract device signature from input signal.
-        
-        Args:
-            x: Input tensor
+        with torch.no_grad():
+            reconstruction, mu, logvar = self.forward(x)
             
-        Returns:
-            Device signature vector
-        """
-        z = self.get_latent(x)
-        return self.signature_extractor(z)
-    
-    def forward_with_classification(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Forward pass with optional device classification.
-        
-        Args:
-            x: Input tensor
+            # Calculate reconstruction error
+            recon_error = torch.mean((x - reconstruction) ** 2, dim=(1, 2))
             
-        Returns:
-            Tuple of (reconstruction, latent, device_logits)
-        """
-        reconstruction, z = self.forward(x)
-        
-        device_logits = None
-        if self.device_classifier is not None:
-            device_logits = self.device_classifier(z)
-        
-        return reconstruction, z, device_logits
+            # Calculate KL divergence
+            kl_div = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+            
+            # Combined anomaly score
+            anomaly_score = recon_error + 0.1 * kl_div
+            
+        return anomaly_score

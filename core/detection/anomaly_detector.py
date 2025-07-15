@@ -20,7 +20,7 @@ from .threshold_manager import DynamicThresholdManager
 
 class AnomalyDetector:
     """
-    Complete anomaly detection system for RF signals.
+    Complete anomaly detection system for RF signals using VAE.
     Optimized for edge deployment on Jetson devices.
     """
     
@@ -47,9 +47,12 @@ class AnomalyDetector:
         
         # Initialize components
         self.preprocessor = SignalPreprocessor(self.config.get('preprocessing', {}))
+        
+        # Initialize VAE model
         self.model = ImprovedRFAutoencoder(
             window_size, 
-            latent_dim=self.config['model']['latent_dim']
+            latent_dim=self.config['model']['latent_dim'],
+            beta=self.config['model'].get('beta', 1.0)
         ).to(self.device)
         
         # Use half precision on CUDA devices
@@ -62,7 +65,7 @@ class AnomalyDetector:
             lr=self.config['training']['learning_rate'],
             weight_decay=self.config['training']['weight_decay']
         )
-        self.scaler = amp.GradScaler()
+        self.scaler = torch.amp.GradScaler('cuda')
         
         # Threshold manager
         self.threshold_manager = DynamicThresholdManager(
@@ -92,8 +95,7 @@ class AnomalyDetector:
         return {
             'model': {
                 'latent_dim': 32,
-                # Weight for VAE KL divergence term
-                'kl_weight': 0.001
+                'beta': 1.0  # Beta for beta-VAE
             },
             'training': {
                 'learning_rate': 0.001,
@@ -118,10 +120,10 @@ class AnomalyDetector:
             'model_dir': 'models'
         }
     
-    @torch.cuda.amp.autocast()
+    @torch.amp.autocast('cuda')
     def detect(self, i_data: np.ndarray, q_data: np.ndarray) -> Tuple[bool, float, dict]:
         """
-        Detect anomalies in I/Q data.
+        Detect anomalies in I/Q data using VAE.
         
         Args:
             i_data: In-phase component
@@ -138,23 +140,21 @@ class AnomalyDetector:
         temporal_features = self.preprocessor.extract_temporal_features(i_data, q_data)
         rf_puf_features = self.preprocessor.extract_rf_puf_features(i_data, q_data)
         
-        # Forward pass through model
+        # Forward pass through VAE
         self.model.eval()
         with torch.no_grad():
-            reconstruction, latent = self.model(iq_tensor)
+            # Get anomaly score from VAE
+            anomaly_score = self.model.get_anomaly_score(iq_tensor)
             
-            # Calculate reconstruction errors
+            # Get reconstruction for additional metrics
+            reconstruction, mu, logvar = self.model(iq_tensor)
+            
+            # Calculate various error metrics
             mse_error = torch.mean((iq_tensor - reconstruction) ** 2)
             mae_error = torch.mean(torch.abs(iq_tensor - reconstruction))
             
-            # Spectral error
-            orig_fft = torch.fft.rfft(iq_tensor, dim=2)
-            recon_fft = torch.fft.rfft(reconstruction, dim=2)
-            spectral_error = torch.mean(torch.abs(orig_fft - recon_fft))
-            
-            # Use mean absolute error and compute deviation from training baseline
-            # Use mean absolute error directly for detection
-            error = mae_error.item()
+            # Use anomaly score as primary detection metric
+            error = anomaly_score.item()
         
         # Update threshold manager
         self.threshold_manager.update(error, self.is_learning)
@@ -168,15 +168,13 @@ class AnomalyDetector:
         if is_anomaly and not self.is_learning:
             self.total_detections += 1
         
-        # Store history and last results
+        # Store history
         self.detection_history.append({
             'timestamp': time.time(),
             'error': error,
+            'is_anomaly': is_anomaly,
             'confidence': confidence
         })
-        # Store last detection results for external uses
-        self.last_is_anomaly = is_anomaly
-        self.last_error = error
         
         self.feature_history.append({
             **spectral_features,
@@ -190,15 +188,16 @@ class AnomalyDetector:
             if (len(self.batch_buffer) >= self.config['training']['batch_size'] and 
                 self.sample_count % self.config['training']['update_interval'] == 0):
                 self._update_model_batch()
-        # Compile return metrics including extracted features
+        
+        # Compile metrics
         metrics = {
             'error': error,
+            'anomaly_score': error,
             'mse_error': mse_error.item(),
             'mae_error': mae_error.item(),
-            'spectral_error': spectral_error.item(),
             'threshold': self.threshold_manager.get_threshold(),
-            'latent_mean': torch.mean(latent).item(),
-            'latent_std': torch.std(latent).item(),
+            'latent_mean': torch.mean(mu).item(),
+            'latent_std': torch.std(mu).item(),
             **spectral_features,
             **temporal_features,
             **rf_puf_features
@@ -207,7 +206,7 @@ class AnomalyDetector:
         return is_anomaly, confidence, metrics
     
     def _update_model_batch(self) -> None:
-        """Perform batch update of the model during learning."""
+        """Perform batch update of the VAE model during learning."""
         if len(self.batch_buffer) < self.config['training']['batch_size']:
             return
         
@@ -218,23 +217,13 @@ class AnomalyDetector:
         batch = torch.cat(list(self.batch_buffer)[:batch_size], dim=0)
         
         # Mixed precision training
-        with amp.autocast():
-            # Forward pass (VAE): returns reconstruction and latent z
-            reconstruction, latent = self.model(batch)
-            # Reconstruction loss
-            mse_loss = torch.nn.functional.mse_loss(reconstruction, batch)
-            # Latent L1 regularization (optional)
-            latent_reg = torch.mean(torch.abs(latent))
-            # VAE KL divergence
-            mu = getattr(self.model, 'mu', None)
-            logvar = getattr(self.model, 'logvar', None)
-            if mu is not None and logvar is not None:
-                kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-            else:
-                kl_loss = 0.0
-            # Total loss with KL term
-            kl_weight = self.config['model'].get('kl_weight', 0.001)
-            loss = mse_loss + 0.01 * latent_reg + kl_weight * kl_loss
+        with torch.amp.autocast('cuda'):
+            # Forward pass
+            reconstruction, mu, logvar = self.model(batch)
+            
+            # Calculate VAE loss
+            losses = self.model.loss_function(batch, reconstruction, mu, logvar)
+            loss = losses['loss']
         
         # Backward pass
         self.optimizer.zero_grad()
@@ -260,6 +249,7 @@ class AnomalyDetector:
         self.learning_start = time.time()
         self.learning_duration = duration
         self.threshold_manager.set_learning_mode(True)
+        print(f"Learning phase started for {duration} seconds")
     
     def stop_learning(self) -> dict:
         """
@@ -273,6 +263,8 @@ class AnomalyDetector:
         
         stats = self.threshold_manager.get_statistics()
         learning_time = time.time() - self.learning_start
+        
+        print(f"Learning complete. Processed {self.sample_count} samples")
         
         return {
             'learning_duration': learning_time,
@@ -317,7 +309,7 @@ class AnomalyDetector:
             Path to saved model
         """
         if name is None:
-            name = f"model_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            name = f"vae_model_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         path = os.path.join(self.model_dir, f"{name}.pth")
         
@@ -332,6 +324,7 @@ class AnomalyDetector:
             'feature_history': list(self.feature_history)[-100:]  # Save recent features
         }, path)
         
+        print(f"Model saved to {path}")
         return path
     
     def load_model(self, path: str) -> None:
@@ -355,7 +348,8 @@ class AnomalyDetector:
         
         # Restore threshold manager state if available
         if 'threshold_stats' in checkpoint:
-            # This is a simplified restoration - you might want to extend this
             stats = checkpoint['threshold_stats']
             if 'current_threshold' in stats:
                 self.threshold_manager.stable_threshold = stats['current_threshold']
+                
+        print(f"Model loaded from {path}")
