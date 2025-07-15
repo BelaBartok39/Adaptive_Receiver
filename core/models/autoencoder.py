@@ -34,13 +34,11 @@ class ImprovedRFAutoencoder(nn.Module):
         # Attention mechanism
         self.attention = self._build_attention()
         
-        # Bottleneck
-        self.encoder_fc = nn.Sequential(
-            nn.AdaptiveAvgPool1d(8),
-            nn.Flatten(),
-            nn.Linear(128 * 8, latent_dim),
-            nn.Tanh()  # Bound latent space
-        )
+        # Variational bottleneck: separate layers for mu and logvar
+        self.pool = nn.AdaptiveAvgPool1d(8)
+        self.flatten = nn.Flatten()
+        self.mu_fc = nn.Linear(128 * 8, latent_dim)
+        self.logvar_fc = nn.Linear(128 * 8, latent_dim)
         
         # Decoder
         self.decoder_fc = nn.Sequential(
@@ -120,8 +118,17 @@ class ImprovedRFAutoencoder(nn.Module):
         att_weights = self.attention(e3).unsqueeze(2)
         e3_attended = e3 * att_weights
         
-        # Bottleneck
-        z = self.encoder_fc(e3_attended)
+        # Bottleneck (VAE): compute mu and logvar, then sample z
+        pooled = self.pool(e3_attended)
+        flat = self.flatten(pooled)
+        mu = self.mu_fc(flat)
+        logvar = self.logvar_fc(flat)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        # store for KL loss
+        self.mu = mu
+        self.logvar = logvar
         
         # Decoder
         d = self.decoder_fc(z)

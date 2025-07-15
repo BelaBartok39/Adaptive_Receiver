@@ -91,7 +91,9 @@ class AnomalyDetector:
         """Get default configuration."""
         return {
             'model': {
-                'latent_dim': 32
+                'latent_dim': 32,
+                # Weight for VAE KL divergence term
+                'kl_weight': 0.001
             },
             'training': {
                 'learning_rate': 0.001,
@@ -217,16 +219,22 @@ class AnomalyDetector:
         
         # Mixed precision training
         with amp.autocast():
+            # Forward pass (VAE): returns reconstruction and latent z
             reconstruction, latent = self.model(batch)
-            
-            # Multi-component loss
+            # Reconstruction loss
             mse_loss = torch.nn.functional.mse_loss(reconstruction, batch)
-            
-            # Latent regularization
+            # Latent L1 regularization (optional)
             latent_reg = torch.mean(torch.abs(latent))
-            
-            # Total loss
-            loss = mse_loss + 0.01 * latent_reg
+            # VAE KL divergence
+            mu = getattr(self.model, 'mu', None)
+            logvar = getattr(self.model, 'logvar', None)
+            if mu is not None and logvar is not None:
+                kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+            else:
+                kl_loss = 0.0
+            # Total loss with KL term
+            kl_weight = self.config['model'].get('kl_weight', 0.001)
+            loss = mse_loss + 0.01 * latent_reg + kl_weight * kl_loss
         
         # Backward pass
         self.optimizer.zero_grad()
