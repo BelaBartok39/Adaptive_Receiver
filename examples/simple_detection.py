@@ -269,42 +269,42 @@ def main():
     args = parser.parse_args()
     
     try:
-        # Initialize detector with config-based settings
-        detector = SimpleJammingDetector(port=args.port, window_size=args.window)
-        
-        # Load pre-trained model if specified
-        if args.model:
-            print(f"Loading pre-trained model from {args.model}")
-            detector.detector.load_model(args.model)
-        
         print("\nStarting RF Jamming Detector with VAE...")
         print("Press Ctrl+C to stop")
         print("-" * 50)
-        
-        # Choose interface mode
+        # GUI mode: skip wrapper to avoid port conflict
         if args.gui and not args.no_gui:
             try:
                 from core.detection.anomaly_detector import AnomalyDetector
                 from gui.main_window import AdaptiveReceiverGUI
-
-                print("Launching GUI interface with raw detector...")
-                # Create a raw AnomalyDetector and pass to GUI
+                # Instantiate raw detector
                 raw_detector = AnomalyDetector(
-                    window_size=args.window if args.window else detector.window_size,
-                    config=detector.detector_config
+                    window_size=args.window or args.window,
+                    config=load_detector_config()
                 )
+                # Load model if provided
+                if args.model:
+                    print(f"Loading pre-trained model from {args.model}")
+                    raw_detector.load_model(args.model)
+                print("Launching GUI interface...")
                 gui = AdaptiveReceiverGUI(raw_detector, port=args.port)
-                # Start GUI-managed detection (it handles its own receive loop)
                 gui.start_detection()
                 gui.run()
             except Exception as e:
                 print(f"GUI not available: {e}")
                 print("Falling back to command-line interface...")
+                # CLI wrapper
+                detector = SimpleJammingDetector(port=args.port, window_size=args.window)
+                if args.model:
+                    detector.detector.load_model(args.model)
                 detector.start()
         else:
-            # Command-line interface
+            # Command-line interface with wrapper
+            detector = SimpleJammingDetector(port=args.port, window_size=args.window)
+            if args.model:
+                print(f"Loading pre-trained model from {args.model}")
+                detector.detector.load_model(args.model)
             detector.start()
-        
     except FileNotFoundError as e:
         print(f"Configuration file not found: {e}")
         print("Make sure you're running from the correct directory with config files.")
@@ -312,9 +312,9 @@ def main():
         print("\nShutdown requested...")
     except Exception as e:
         print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
     finally:
+        # Graceful shutdown
         if 'detector' in locals():
             detector.stop()
 
