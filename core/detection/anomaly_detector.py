@@ -1,129 +1,131 @@
 """
-Main anomaly detection module that orchestrates the detection pipeline.
-Integrates preprocessing, autoencoder, and threshold management.
+Core anomaly detection module using VAE.
+Fixed to properly detect anomalies after learning phase.
 """
 
 import torch
-import torch.cuda.amp as amp
+import torch.optim as optim
+from torch.cuda.amp import autocast, GradScaler
 import numpy as np
-from collections import deque
+from pathlib import Path
+from datetime import datetime
 from typing import Tuple, Dict, Optional, List
 import time
-import os
 import json
-import datetime
 
 from ..models.autoencoder import ImprovedRFAutoencoder
 from ..preprocessing.signal_filters import SignalPreprocessor
-from .threshold_manager import DynamicThresholdManager
+from ..detection.threshold_manager import DynamicThresholdManager
 
 
 class AnomalyDetector:
     """
-    Complete anomaly detection system for RF signals using VAE.
-    Optimized for edge deployment on Jetson devices.
+    Main anomaly detection class using VAE with proper threshold management.
     """
     
-    def __init__(self, 
-                 window_size: int = 1024,
-                 device: Optional[str] = None,
-                 config: Optional[dict] = None):
+    def __init__(self, window_size: int = 1024, config: Optional[Dict] = None):
         """
         Initialize the anomaly detector.
         
         Args:
-            window_size: Size of signal windows to process
-            device: Device to run on ('cuda', 'cpu', or None for auto)
+            window_size: Size of input windows
             config: Optional configuration dictionary
         """
         self.window_size = window_size
         self.config = config or self._default_config()
         
-        # Setup device
-        if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = torch.device(device)
+        # Device selection
+        self.device = self._select_device()
+        print(f"Anomaly detector using device: {self.device}")
         
         # Initialize components
+        self.model = self._build_model()
         self.preprocessor = SignalPreprocessor(self.config.get('preprocessing', {}))
-        
-        # Initialize VAE model
-        self.model = ImprovedRFAutoencoder(
-            window_size, 
-            latent_dim=self.config['model']['latent_dim'],
-            beta=self.config['model'].get('beta', 1.0)
-        ).to(self.device)
-        
-        # Use half precision on CUDA devices
-        if self.device.type == 'cuda':
-            self.model.half()
-        
-        # Optimizer and scaler for training
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.config['training']['learning_rate'],
-            weight_decay=self.config['training']['weight_decay']
-        )
-        self.scaler = torch.amp.GradScaler('cuda')
-        
-        # Threshold manager
         self.threshold_manager = DynamicThresholdManager(
-            window_size=self.config['threshold']['window_size'],
-            config=self.config['threshold']
+            window_size=1000,
+            config=self.config.get('threshold', {})
         )
+        
+        # Optimizer and scaler for mixed precision
+        self.optimizer = optim.Adam(
+            self.model.parameters(),
+            lr=self.config['training']['learning_rate']
+        )
+        self.scaler = GradScaler() if self.device.type == 'cuda' else None
         
         # State tracking
         self.is_learning = False
+        self.learning_start_time = None
+        self.learning_duration = None
         self.sample_count = 0
         self.total_detections = 0
-        self.session_start = time.time()
         
-        # Batch buffer for online learning
-        self.batch_buffer = deque(maxlen=self.config['training']['batch_buffer_size'])
-        
-        # History tracking
-        self.detection_history = deque(maxlen=1000)
-        self.feature_history = deque(maxlen=1000)
+        # Detection history
+        self.detection_history = []
+        self.max_history = 100
         
         # Model persistence
-        self.model_dir = self.config.get('model_dir', 'models')
-        os.makedirs(self.model_dir, exist_ok=True)
+        self.model_dir = Path("models")
+        self.model_dir.mkdir(exist_ok=True)
+        
+        # Batch processing for efficiency
+        self.batch_buffer = []
+        self.batch_size = self.config['training'].get('batch_size', 32)
+        
+        print(f"Detector initialized with window size: {window_size}")
     
-    def _default_config(self) -> dict:
+    def _default_config(self) -> Dict:
         """Get default configuration."""
         return {
             'model': {
                 'latent_dim': 32,
-                'beta': 1.0  # Beta for beta-VAE
+                'beta': 1.0
             },
             'training': {
                 'learning_rate': 0.001,
-                'weight_decay': 0.0001,
-                'batch_buffer_size': 32,
-                'update_interval': 100,
-                'batch_size': 16
-            },
-            'threshold': {
-                'window_size': 1000,
-                'base_percentile': 99.0,
-                'adaptation_rate': 0.01,
-                'min_samples': 100,
-                'ema_alpha': 0.05,
-                'safety_margin': 1.5,
-                'min_threshold_ratio': 0.8
+                'batch_size': 32,
+                'update_frequency': 10
             },
             'preprocessing': {
                 'normalization': 'robust',
-                'clip_sigma': 5.0
+                'device': 'cuda' if torch.cuda.is_available() else 'cpu'
             },
-            'model_dir': 'models'
+            'threshold': {
+                'percentile': 99.0,
+                'margin_multiplier': 1.5,
+                'min_samples': 100
+            }
         }
     
-    @torch.amp.autocast('cuda')
-    def detect(self, i_data: np.ndarray, q_data: np.ndarray) -> Tuple[bool, float, dict]:
+    def _select_device(self) -> torch.device:
+        """Select the best available device."""
+        if torch.cuda.is_available():
+            # Get GPU properties
+            props = torch.cuda.get_device_properties(0)
+            print(f"GPU detected: {props.name} ({props.total_memory // 1024**2} MB)")
+            return torch.device('cuda')
+        else:
+            print("No GPU available, using CPU")
+            return torch.device('cpu')
+    
+    def _build_model(self) -> ImprovedRFAutoencoder:
+        """Build and initialize the model."""
+        model = ImprovedRFAutoencoder(
+            input_size=self.window_size,
+            latent_dim=self.config['model']['latent_dim'],
+            beta=self.config['model'].get('beta', 1.0)
+        )
+        model.to(self.device)
+        
+        # Enable mixed precision if available
+        if self.device.type == 'cuda':
+            model.half()
+        
+        return model
+    
+    def detect(self, i_data: np.ndarray, q_data: np.ndarray) -> Tuple[bool, float, Dict]:
         """
-        Detect anomalies in I/Q data using VAE.
+        Detect anomalies in I/Q data.
         
         Args:
             i_data: In-phase component
@@ -132,224 +134,246 @@ class AnomalyDetector:
         Returns:
             Tuple of (is_anomaly, confidence, metrics)
         """
+        self.sample_count += 1
+        
         # Preprocess data
         iq_tensor = self.preprocessor.preprocess_iq(i_data, q_data)
         
-        # Extract additional features
-        spectral_features = self.preprocessor.extract_spectral_features(i_data, q_data)
-        temporal_features = self.preprocessor.extract_temporal_features(i_data, q_data)
-        rf_puf_features = self.preprocessor.extract_rf_puf_features(i_data, q_data)
-        
-        # Forward pass through VAE
-        self.model.eval()
+        # Get model output
         with torch.no_grad():
-            # Get anomaly score from VAE
-            anomaly_score = self.model.get_anomaly_score(iq_tensor)
-            
-            # Get reconstruction for additional metrics
-            reconstruction, mu, logvar = self.model(iq_tensor)
-            
-            # Calculate various error metrics
-            mse_error = torch.mean((iq_tensor - reconstruction) ** 2)
-            mae_error = torch.mean(torch.abs(iq_tensor - reconstruction))
-            
-            # Use anomaly score as primary detection metric
-            error = anomaly_score.item()
+            if self.device.type == 'cuda':
+                with autocast():
+                    anomaly_score = self.model.get_anomaly_score(iq_tensor)
+            else:
+                anomaly_score = self.model.get_anomaly_score(iq_tensor)
+        
+        # Convert to scalar
+        error = float(anomaly_score.cpu().numpy()[0])
         
         # Update threshold manager
-        self.threshold_manager.update(error, self.is_learning)
+        self.threshold_manager.update(error, is_learning=self.is_learning)
         
-        # Get detection result
-        is_anomaly = self.threshold_manager.should_trigger_alert(error)
-        confidence = self.threshold_manager.get_confidence(error)
-        
-        # Update statistics
-        self.sample_count += 1
-        if is_anomaly and not self.is_learning:
-            self.total_detections += 1
-        
-        # Store history
-        self.detection_history.append({
-            'timestamp': time.time(),
-            'error': error,
-            'is_anomaly': is_anomaly,
-            'confidence': confidence
-        })
-        
-        self.feature_history.append({
-            **spectral_features,
-            **temporal_features,
-            **rf_puf_features
-        })
-        
-        # Conditional batch update during learning
+        # During learning, always update model
         if self.is_learning:
             self.batch_buffer.append(iq_tensor)
-            if (len(self.batch_buffer) >= self.config['training']['batch_size'] and 
-                self.sample_count % self.config['training']['update_interval'] == 0):
+            if len(self.batch_buffer) >= self.batch_size:
                 self._update_model_batch()
         
-        # Compile metrics
+        # Get detection threshold
+        threshold = self.threshold_manager.get_threshold()
+        
+        # Determine if anomaly
+        is_anomaly = False
+        confidence = 0.0
+        
+        if not self.is_learning and threshold != float('inf'):
+            # Check if error exceeds threshold
+            is_anomaly = error > threshold
+            
+            # Use threshold manager's alert logic for better accuracy
+            should_alert = self.threshold_manager.should_trigger_alert(error)
+            
+            if is_anomaly:
+                confidence = self.threshold_manager.get_confidence(error)
+                self.total_detections += 1
+                
+                # Only set is_anomaly if alert should be triggered
+                is_anomaly = should_alert
+        
+        # Build metrics
         metrics = {
             'error': error,
-            'anomaly_score': error,
-            'mse_error': mse_error.item(),
-            'mae_error': mae_error.item(),
-            'threshold': self.threshold_manager.get_threshold(),
-            'latent_mean': torch.mean(mu).item(),
-            'latent_std': torch.std(mu).item(),
-            **spectral_features,
-            **temporal_features,
-            **rf_puf_features
+            'threshold': threshold if threshold != float('inf') else None,
+            'is_learning': self.is_learning,
+            'sample_count': self.sample_count
         }
+        
+        # Add to history
+        detection_entry = {
+            'timestamp': time.time(),
+            'error': error,
+            'threshold': threshold,
+            'is_anomaly': is_anomaly,
+            'confidence': confidence
+        }
+        
+        self.detection_history.append(detection_entry)
+        if len(self.detection_history) > self.max_history:
+            self.detection_history.pop(0)
         
         return is_anomaly, confidence, metrics
     
-    def _update_model_batch(self) -> None:
-        """Perform batch update of the VAE model during learning."""
-        if len(self.batch_buffer) < self.config['training']['batch_size']:
+    def _update_model_batch(self):
+        """Update model with accumulated batch."""
+        if not self.batch_buffer:
             return
         
+        # Stack tensors into batch
+        batch = torch.cat(self.batch_buffer, dim=0)
+        self.batch_buffer.clear()
+        
+        # Forward pass
         self.model.train()
         
-        # Create batch
-        batch_size = self.config['training']['batch_size']
-        batch = torch.cat(list(self.batch_buffer)[:batch_size], dim=0)
-        
-        # Mixed precision training
-        with torch.amp.autocast('cuda'):
-            # Forward pass
-            reconstruction, mu, logvar = self.model(batch)
+        if self.device.type == 'cuda' and self.scaler:
+            with autocast():
+                reconstruction, mu, logvar = self.model(batch)
+                loss_dict = self.model.loss_function(batch, reconstruction, mu, logvar)
+                loss = loss_dict['loss']
             
-            # Calculate VAE loss
-            losses = self.model.loss_function(batch, reconstruction, mu, logvar)
-            loss = losses['loss']
+            # Backward pass with mixed precision
+            self.optimizer.zero_grad()
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            # Standard training
+            reconstruction, mu, logvar = self.model(batch)
+            loss_dict = self.model.loss_function(batch, reconstruction, mu, logvar)
+            loss = loss_dict['loss']
+            
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
         
-        # Backward pass
-        self.optimizer.zero_grad()
-        self.scaler.scale(loss).backward()
-        self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        
-        # Clear some of the buffer
-        for _ in range(batch_size // 2):
-            if self.batch_buffer:
-                self.batch_buffer.popleft()
+        self.model.eval()
     
-    def start_learning(self, duration: float = 60.0) -> None:
+    def start_learning(self, duration: int):
         """
         Start learning phase.
         
         Args:
             duration: Learning duration in seconds
         """
+        print(f"Starting learning phase for {duration} seconds...")
         self.is_learning = True
-        self.learning_start = time.time()
+        self.learning_start_time = time.time()
         self.learning_duration = duration
+        
+        # Reset threshold manager for fresh learning
         self.threshold_manager.set_learning_mode(True)
-        print(f"Learning phase started for {duration} seconds")
+        
+        # Clear detection history
+        self.detection_history.clear()
+        self.total_detections = 0
     
-    def stop_learning(self) -> dict:
+    def stop_learning(self) -> Dict:
         """
-        Stop learning phase and return statistics.
+        Stop learning phase and calculate threshold.
         
         Returns:
             Learning statistics
         """
+        if not self.is_learning:
+            return {}
+        
+        # Process any remaining batch
+        if self.batch_buffer:
+            self._update_model_batch()
+        
+        # Stop learning mode
         self.is_learning = False
         self.threshold_manager.set_learning_mode(False)
         
+        # Get final statistics
         stats = self.threshold_manager.get_statistics()
-        learning_time = time.time() - self.learning_start
         
-        print(f"Learning complete. Processed {self.sample_count} samples")
-        
-        return {
-            'learning_duration': learning_time,
+        learning_stats = {
+            'duration': time.time() - self.learning_start_time,
             'samples_processed': self.sample_count,
-            'threshold_stats': stats
+            'final_threshold': stats.get('current_threshold', float('inf')),
+            'mean_error': stats.get('learning_mean', 0),
+            'std_error': stats.get('learning_std', 0)
         }
-    
-    def get_status(self) -> dict:
-        """
-        Get current detector status.
         
-        Returns:
-            Status dictionary
-        """
-        if self.is_learning:
-            elapsed = time.time() - self.learning_start
-            remaining = max(0, self.learning_duration - elapsed)
-            if remaining == 0:
-                self.stop_learning()
-            
-            return {
-                'mode': 'learning',
-                'remaining_time': remaining,
-                'samples_processed': self.sample_count
-            }
-        else:
-            return {
-                'mode': 'detection',
-                'total_detections': self.total_detections,
-                'samples_processed': self.sample_count,
-                'session_duration': time.time() - self.session_start
-            }
+        print(f"Learning complete. Threshold: {learning_stats['final_threshold']:.4f}")
+        
+        return learning_stats
     
-    def save_model(self, name: Optional[str] = None) -> str:
+    def get_status(self) -> Dict:
+        """Get current detector status."""
+        status = {
+            'mode': 'learning' if self.is_learning else 'detection',
+            'sample_count': self.sample_count,
+            'total_detections': self.total_detections,
+            'device': str(self.device)
+        }
+        
+        if self.is_learning and self.learning_start_time:
+            elapsed = time.time() - self.learning_start_time
+            remaining = max(0, self.learning_duration - elapsed)
+            progress = min(100, (elapsed / self.learning_duration) * 100)
+            
+            status.update({
+                'learning_elapsed': elapsed,
+                'remaining_time': remaining,
+                'progress': progress
+            })
+        
+        # Add threshold info
+        threshold_stats = self.threshold_manager.get_statistics()
+        status['threshold_info'] = {
+            'current': threshold_stats.get('current_threshold', float('inf')),
+            'is_calculated': threshold_stats.get('threshold_calculated', False)
+        }
+        
+        return status
+    
+    def save_model(self, filename: Optional[str] = None) -> str:
         """
-        Save the current model and state.
+        Save model and configuration.
         
         Args:
-            name: Optional model name
+            filename: Optional filename
             
         Returns:
             Path to saved model
         """
-        if name is None:
-            name = f"vae_model_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"rf_anomaly_model_{timestamp}.pth"
         
-        path = os.path.join(self.model_dir, f"{name}.pth")
+        filepath = self.model_dir / filename
         
-        torch.save({
-            'model_state': self.model.state_dict(),
-            'optimizer_state': self.optimizer.state_dict(),
-            'scaler_state': self.scaler.state_dict(),
-            'threshold_stats': self.threshold_manager.get_statistics(),
+        # Save model state and configuration
+        save_dict = {
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
             'config': self.config,
+            'window_size': self.window_size,
             'sample_count': self.sample_count,
-            'total_detections': self.total_detections,
-            'feature_history': list(self.feature_history)[-100:]  # Save recent features
-        }, path)
+            'threshold_stats': self.threshold_manager.get_statistics()
+        }
         
-        print(f"Model saved to {path}")
-        return path
+        torch.save(save_dict, filepath)
+        print(f"Model saved to {filepath}")
+        
+        return str(filepath)
     
-    def load_model(self, path: str) -> None:
+    def load_model(self, filepath: str):
         """
-        Load a saved model.
+        Load model from file.
         
         Args:
-            path: Path to saved model
+            filepath: Path to model file
         """
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(filepath, map_location=self.device)
         
-        self.model.load_state_dict(checkpoint['model_state'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state'])
-        self.scaler.load_state_dict(checkpoint['scaler_state'])
+        # Load model state
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
-        # Restore other state
-        if 'sample_count' in checkpoint:
-            self.sample_count = checkpoint['sample_count']
-        if 'total_detections' in checkpoint:
-            self.total_detections = checkpoint['total_detections']
+        # Update configuration if available
+        if 'config' in checkpoint:
+            self.config.update(checkpoint['config'])
         
-        # Restore threshold manager state if available
+        # Restore threshold if available
         if 'threshold_stats' in checkpoint:
             stats = checkpoint['threshold_stats']
-            if 'current_threshold' in stats:
+            if 'current_threshold' in stats and stats['current_threshold'] != float('inf'):
                 self.threshold_manager.stable_threshold = stats['current_threshold']
-                
-        print(f"Model loaded from {path}")
+                self.threshold_manager.threshold_calculated = True
+                self.threshold_manager.is_learning = False
+                print(f"Loaded threshold: {stats['current_threshold']:.4f}")
+        
+        print(f"Model loaded from {filepath}")

@@ -1,166 +1,244 @@
 """
 Main GUI application for the Adaptive RF Receiver.
-Provides real-time visualization and control interface.
+Direct integration with AnomalyDetector - no wrapper needed.
 """
 
 import tkinter as tk
 from tkinter import ttk
 import tkinter.messagebox
 import tkinter.filedialog
-import socket
-import struct
-import threading
-import time
-import datetime
-from scipy import signal
 import numpy as np
+import threading
+import queue
+import time
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 from collections import deque
-from typing import Optional, Union, Dict
 
+# Core imports
+from core.detection.anomaly_detector import AnomalyDetector
+from network.receiver import RFDataReceiver
+from core.utils.data_buffer import SlidingWindowBuffer
+from config.config_loader import load_detector_config, load_network_config, load_signal_config
+
+# GUI imports
 from .plots import PlotManager
 from .widgets import StatusPanel, ControlPanel, StatisticsPanel
 
 
 class AdaptiveReceiverGUI:
-    """Main GUI application for the Adaptive RF Receiver."""
+    """Direct GUI for the Adaptive RF Receiver with optimized performance."""
     
-    def __init__(self, detector_instance, window_title: str = "Adaptive RF Receiver"):
+    def __init__(self, port: int = None, window_size: int = None):
         """
-        Initialize the GUI.
+        Initialize the GUI with direct detector integration.
         
         Args:
-            detector_instance: An instance of SimpleJammingDetector.
-            window_title: Title for the main window.
+            port: UDP port to listen on (overrides config)
+            window_size: Size of processing windows (overrides config)
         """
-        # The GUI now expects a fully-initialized SimpleJammingDetector
-        self.simple_detector = detector_instance
-        self.detector = self.simple_detector.detector
-        self.port = self.simple_detector.port
+        # Load configurations
+        self.network_config = load_network_config()
+        self.signal_config = load_signal_config()
+        self.detector_config = load_detector_config()
         
+        # Set parameters
+        self.port = port if port is not None else self.network_config.get('udp_port', 12345)
+        self.window_size = window_size if window_size is not None else self.signal_config.get('window_size', 1024)
+        
+        # Initialize detector directly
+        print(f"Initializing detector on port {self.port}")
+        self.detector = AnomalyDetector(
+            window_size=self.window_size,
+            config=self.detector_config
+        )
+        print(f"Using device: {self.detector.device}")
+        
+        # Initialize receiver
+        self.receiver = RFDataReceiver(
+            port=self.port,
+            buffer_size=self.network_config.get('buffer_size', 65536),
+            callback=self._on_data_received
+        )
+        
+        # Initialize window buffer
+        self.window_buffer = SlidingWindowBuffer(
+            window_size=self.window_size,
+            stride=self.window_size // 2
+        )
+        
+        # Threading components for GPU processing
+        self.process_queue = queue.Queue(maxsize=100)
+        self.result_queue = queue.Queue(maxsize=100)
+        self.gpu_thread = None
         self.running = False
         
-        # Create main window
-        self.root = tk.Tk()
-        self.root.title(window_title)
-        self.root.geometry("1200x800")
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # Performance monitoring
+        self.fps_counter = deque(maxlen=30)
+        self.detection_count = 0
+        self.last_detection_time = 0
         
-        # Networking is now handled entirely by SimpleJammingDetector
-        
-        # Data buffers for plots
+        # Data buffers for plots (reduced size for performance)
         self.plot_data = {
             'time': deque(maxlen=500),
             'error': deque(maxlen=500),
             'threshold': deque(maxlen=500),
             'detections': deque(maxlen=500),
-            # Reduce constellation points for performance
             'i_constellation': deque(maxlen=200),
             'q_constellation': deque(maxlen=200),
-            # Spectral data
             'spec_freqs': None,
             'spec_psd': None
         }
         
-        # Performance monitoring
-        self.fps_counter = deque(maxlen=30)
-        self.last_fps_time = time.time()
-        
-        # Add a counter for throttling expensive updates
-        self.update_counter = 0
+        # Create GUI
+        self.root = tk.Tk()
+        self.root.title("Adaptive RF Receiver")
+        self.root.geometry("1200x800")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         # Setup GUI components
         self.setup_gui()
         
-        # Hook into SimpleJammingDetector's processing
-        self._setup_simple_detector_hooks()
+        # Start periodic GUI update
+        self.update_counter = 0
+        self.schedule_gui_update()
         
-        print(f"GUI initialized, attached to detector on port {self.port}")
-        print(f"Detector device: {self.detector.device}")
+        print("GUI initialized and ready")
     
-    def _setup_simple_detector_hooks(self):
-        """Hook into SimpleJammingDetector's processing pipeline."""
-        # Store reference to original method
-        original_process = self.simple_detector._process_window
-        
-        # Store reference to GUI for use in hook
-        gui_ref = self
-        
-        def hooked_process(i_array: np.ndarray, q_array: np.ndarray, timestamp: float):
-            """Hooked version that updates GUI plots after processing."""
-            try:
-                # Call original processing
-                original_process(i_array, q_array, timestamp)
-                
-                # Schedule GUI update in main thread to avoid race conditions
-                gui_ref.root.after_idle(lambda: gui_ref._update_gui_data(i_array, q_array, timestamp))
-                
-            except Exception as e:
-                print(f"GUI hook error: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        # Replace the method
-        self.simple_detector._process_window = hooked_process
-    
-    def _update_gui_data(self, i_array: np.ndarray, q_array: np.ndarray, timestamp: float):
-        """Thread-safe method to update GUI data from main thread."""
-        try:
-            # After processing, update GUI data
-            # The detector's state is updated by the original_process call
-            detector = self.detector
+    def _on_data_received(self, packet_data: Dict):
+        """Handle incoming data from network."""
+        if not self.running:
+            return
             
-            # Get detection results from last detection
-            is_anomaly = False
-            error = 0.0
+        samples = packet_data['samples']
+        if len(samples) > 0:
+            i_data = samples[:, 0]
+            q_data = samples[:, 1]
             
-            if hasattr(detector, 'detection_history') and len(detector.detection_history) > 0:
-                last_detection = detector.detection_history[-1]
-                is_anomaly = last_detection.get('is_anomaly', False)
-                error = last_detection.get('error', 0.0)
+            # Get windows from buffer
+            windows = self.window_buffer.process_samples(i_data, q_data)
             
-            # Update plot data
-            current_time = detector.sample_count
-            self.plot_data['time'].append(current_time)
-            self.plot_data['error'].append(error)
-            
-            # Get threshold
-            threshold = detector.threshold_manager.get_threshold()
-            if threshold == float('inf'):
-                threshold = error * 2  # For display during learning
-            self.plot_data['threshold'].append(threshold)
-            self.plot_data['detections'].append(is_anomaly)
-            
-            # --- Performance Throttling ---
-            # Only update expensive plots every N frames
-            if self.update_counter % 20 == 0:  # Reduced frequency further
-                # Update constellation plot with actual I/Q data
-                if len(i_array) > 100:
-                    step = len(i_array) // 100
-                    self.plot_data['i_constellation'].extend(i_array[::step])
-                    self.plot_data['q_constellation'].extend(q_array[::step])
-                else:
-                    self.plot_data['i_constellation'].extend(i_array)
-                    self.plot_data['q_constellation'].extend(q_array)
-
-                # Compute spectral data less frequently
+            # Queue windows for GPU processing
+            for i_window, q_window in windows:
                 try:
-                    # Use simpler windowing for better performance
-                    freqs, psd = signal.periodogram(i_array + 1j * q_array, scaling='density', detrend='constant')
-                    self.plot_data['spec_freqs'] = freqs[::2]  # Downsample frequency bins
-                    self.plot_data['spec_psd'] = psd[::2]
-                except Exception as e:
-                    print(f"Spectral calculation error: {e}")
-
-            # Update performance counter
-            self.fps_counter.append(time.time())
-            self.update_counter += 1
-            
-        except Exception as e:
-            print(f"GUI data update error: {e}")
+                    self.process_queue.put_nowait((i_window, q_window, packet_data['timestamp']))
+                except queue.Full:
+                    # Drop oldest if queue is full
+                    try:
+                        self.process_queue.get_nowait()
+                        self.process_queue.put_nowait((i_window, q_window, packet_data['timestamp']))
+                    except:
+                        pass
+    
+    def _gpu_processing_thread(self):
+        """Dedicated thread for GPU processing."""
+        import torch
+        
+        # Ensure CUDA context is created in this thread
+        if self.detector.device.type == 'cuda':
+            torch.cuda.set_device(self.detector.device)
+        
+        while self.running:
+            try:
+                # Get data from queue with timeout
+                i_window, q_window, timestamp = self.process_queue.get(timeout=0.1)
+                
+                # Process on GPU
+                is_anomaly, confidence, metrics = self.detector.detect(i_window, q_window)
+                
+                # Queue results for GUI update
+                result = {
+                    'timestamp': timestamp,
+                    'is_anomaly': is_anomaly,
+                    'confidence': confidence,
+                    'error': metrics['error'],
+                    'i_data': i_window[::10],  # Downsample for constellation
+                    'q_data': q_window[::10]
+                }
+                
+                try:
+                    self.result_queue.put_nowait(result)
+                except queue.Full:
+                    # Drop oldest result
+                    try:
+                        self.result_queue.get_nowait()
+                        self.result_queue.put_nowait(result)
+                    except:
+                        pass
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"GPU processing error: {e}")
+    
+    def schedule_gui_update(self):
+        """Schedule periodic GUI updates from main thread."""
+        self.update_gui_from_results()
+        # Schedule next update (30 FPS)
+        if self.running or self.detector.is_learning:
+            self.root.after(33, self.schedule_gui_update)
+        else:
+            self.root.after(100, self.schedule_gui_update)
+    
+    def update_gui_from_results(self):
+        """Update GUI with processing results (main thread only)."""
+        # Process all available results
+        results_processed = 0
+        max_results = 10  # Limit per update cycle
+        
+        while results_processed < max_results:
+            try:
+                result = self.result_queue.get_nowait()
+                results_processed += 1
+                
+                # Update plot data
+                current_time = self.detector.sample_count
+                self.plot_data['time'].append(current_time)
+                self.plot_data['error'].append(result['error'])
+                
+                # Get current threshold
+                threshold = self.detector.threshold_manager.get_threshold()
+                # Handle learning mode display
+                if threshold == float('inf'):
+                    # During learning, show a reasonable threshold for visualization
+                    if len(self.plot_data['error']) > 10:
+                        recent_errors = list(self.plot_data['error'])[-50:]
+                        threshold = np.mean(recent_errors) + 2 * np.std(recent_errors)
+                    else:
+                        threshold = result['error'] * 1.5
+                
+                self.plot_data['threshold'].append(threshold)
+                self.plot_data['detections'].append(result['is_anomaly'])
+                
+                # Update constellation data (less frequently)
+                if self.update_counter % 5 == 0:
+                    self.plot_data['i_constellation'].extend(result['i_data'])
+                    self.plot_data['q_constellation'].extend(result['q_data'])
+                
+                # Handle detection logging
+                if result['is_anomaly'] and not self.detector.is_learning:
+                    current_time = time.time()
+                    if current_time - self.last_detection_time > 1.0:
+                        self.detection_count += 1
+                        print(f"\n[{time.strftime('%H:%M:%S')}] JAMMING DETECTED! "
+                              f"Confidence: {result['confidence']:.2f}, "
+                              f"Error: {result['error']:.4f}, "
+                              f"Threshold: {threshold:.4f}")
+                        self.last_detection_time = current_time
+                
+                # Update FPS counter
+                self.fps_counter.append(time.time())
+                
+            except queue.Empty:
+                break
+            except Exception as e:
+                print(f"GUI update error: {e}")
+                break
+        
+        self.update_counter += 1
     
     def setup_gui(self):
         """Create and layout GUI components."""
-        # Create main panels
         self.control_panel = ControlPanel(self.root, self)
         self.control_panel.pack(fill=tk.X, padx=10, pady=5)
         
@@ -170,7 +248,6 @@ class AdaptiveReceiverGUI:
         self.stats_panel = StatisticsPanel(self.root, self)
         self.stats_panel.pack(fill=tk.X, padx=10, pady=5)
         
-        # Create plot manager
         self.plot_manager = PlotManager(self.root, self.plot_data)
         self.plot_manager.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
     
@@ -179,50 +256,74 @@ class AdaptiveReceiverGUI:
         if not self.running:
             self.running = True
             
-            # Ensure widgets are drawn and layout is calculated
-            self.root.update_idletasks()
+            # Clear queues
+            while not self.process_queue.empty():
+                self.process_queue.get_nowait()
+            while not self.result_queue.empty():
+                self.result_queue.get_nowait()
             
-            # SimpleJammingDetector handles its own threading
-            self.simple_detector.start()
+            # Start receiver
+            self.receiver.start()
             
-            # Start the plot updates
+            # Start GPU processing thread
+            self.gpu_thread = threading.Thread(target=self._gpu_processing_thread, daemon=True)
+            self.gpu_thread.start()
+            
+            # Start plot animation
             self.plot_manager.start_animation()
             self.control_panel.on_detection_started()
-            print("GUI started detection via SimpleJammingDetector")
+            
+            print("Detection started")
     
     def stop_detection(self):
         """Stop the detection system."""
         if self.running:
             self.running = False
             
-            # Stop the detector
-            self.simple_detector.stop()
+            # Stop receiver
+            self.receiver.stop()
             
-            # Stop plot updates
+            # Wait for GPU thread
+            if self.gpu_thread:
+                self.gpu_thread.join(timeout=2)
+            
+            # Stop plots
             self.plot_manager.stop_animation()
-            
-            # Update control panel
             self.control_panel.on_detection_stopped()
             
-            print("GUI stopped detection")
+            print("Detection stopped")
     
     def start_learning(self, duration: int = 60):
         """Start learning phase."""
-        # Delegate directly to the detector
+        # Clear previous detection data
+        self.plot_data['detections'].clear()
+        self.detection_count = 0
+        
+        # Start learning on detector
         self.detector.start_learning(duration)
-            
         self.control_panel.on_learning_started(duration)
         
         # Schedule learning end
         def end_learning():
             stats = self.detector.stop_learning()
-            message = f"Learning complete. Processed {stats['samples_processed']} samples"
+            
+            # Get final threshold info
+            threshold_stats = self.detector.threshold_manager.get_statistics()
+            final_threshold = threshold_stats.get('current_threshold', 'Unknown')
+            
+            message = (f"Learning complete!\n"
+                      f"Samples processed: {stats['samples_processed']:,}\n"
+                      f"Final threshold: {final_threshold:.4f}\n"
+                      f"Mean error: {threshold_stats.get('mean', 0):.4f}\n"
+                      f"Std deviation: {threshold_stats.get('std', 0):.4f}")
+            
             self.control_panel.on_learning_stopped()
             tk.messagebox.showinfo("Learning Complete", message)
             
-        self.root.after(duration * 1000, end_learning)
+            print(f"\nLearning complete. Threshold set to: {final_threshold:.4f}")
         
-        print(f"Learning phase started for {duration} seconds")
+        self.root.after(duration * 1000, end_learning)
+        print(f"Learning phase started for {duration} seconds...")
     
     def save_model(self):
         """Save the current model."""
@@ -265,18 +366,17 @@ class AdaptiveReceiverGUI:
             recent_detections = list(self.plot_data['detections'])[-100:]
             detection_rate = sum(recent_detections) / len(recent_detections) * 100
         
-        # GPU memory if available
+        # GPU memory
         gpu_memory = 0
-        if hasattr(self.detector, 'device') and self.detector.device.type == 'cuda':
+        if self.detector.device.type == 'cuda':
             try:
                 import torch
                 gpu_memory = torch.cuda.memory_allocated() / 1024 / 1024
             except:
                 pass
         
-        # Get status
+        # Status
         status_info = self.detector.get_status()
-            
         if status_info.get('mode') == 'learning':
             status = f"Learning: {status_info.get('remaining_time', 0):.1f}s"
             status_color = 'orange'
@@ -286,7 +386,7 @@ class AdaptiveReceiverGUI:
         
         return {
             'samples': self.detector.sample_count,
-            'detections': self.detector.total_detections,
+            'detections': self.detection_count,
             'threshold': "Learning..." if threshold == float('inf') else f"{threshold:.4f}",
             'fps': f"{fps:.1f}",
             'gpu_memory': f"{gpu_memory:.1f} MB",
@@ -301,30 +401,35 @@ class AdaptiveReceiverGUI:
         if self.running:
             self.stop_detection()
         
-        # Signal the main loop to exit, allowing for cleanup
         self.root.quit()
-
+    
     def run(self):
         """Start the GUI main loop."""
         print(f"Adaptive RF Receiver GUI ready on port {self.port}")
         print(f"Device: {self.detector.device}")
         
-        # Auto-start detection after a short delay
+        # Auto-start detection
         self.root.after(100, self.start_detection)
         
-        # Enter main loop
+        # Run main loop
         self.root.mainloop()
         
-        # After mainloop exits, we can safely clean up
-        print("GUI mainloop finished. Cleaning up...")
-
-        # Explicitly wait for the detector thread to finish
-        if self.simple_detector and hasattr(self.simple_detector, 'process_thread'):
-             if self.simple_detector.process_thread.is_alive():
-                print("Waiting for detector thread to terminate...")
-                self.simple_detector.process_thread.join(timeout=2.0)
-                if self.simple_detector.process_thread.is_alive():
-                    print("Warning: Detector thread did not terminate gracefully.")
-        
+        # Cleanup
         self.root.destroy()
-        print("GUI Closed.")
+        print("GUI closed.")
+
+
+def main():
+    """Direct GUI launcher."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Adaptive RF Receiver GUI")
+    parser.add_argument('--port', type=int, help="UDP port")
+    parser.add_argument('--window-size', type=int, help="Window size")
+    args = parser.parse_args()
+    
+    gui = AdaptiveReceiverGUI(port=args.port, window_size=args.window_size)
+    gui.run()
+
+
+if __name__ == "__main__":
+    main()
