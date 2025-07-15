@@ -247,8 +247,24 @@ class AdaptiveReceiverGUI:
                     print(f"Updating constellation: i_len={len(i_data)}, q_len={len(q_data)}")
                     if len(i_data) > 0 and len(q_data) > 0:
                         print(f"Constellation ranges: i=[{np.min(i_data):.3f}, {np.max(i_data):.3f}], q=[{np.min(q_data):.3f}, {np.max(q_data):.3f}]")
-                        self.plot_data['i_constellation'].extend(i_data)
-                        self.plot_data['q_constellation'].extend(q_data)
+                        
+                        # Clear old data and add new (deque extend can be problematic with maxlen)
+                        self.plot_data['i_constellation'].clear()
+                        self.plot_data['q_constellation'].clear()
+                        
+                        # Add data in chunks to respect maxlen
+                        max_points = 200  # Match deque maxlen
+                        if len(i_data) > max_points:
+                            # Take the last N points
+                            i_data = i_data[-max_points:]
+                            q_data = q_data[-max_points:]
+                        
+                        # Add one by one to ensure proper deque behavior
+                        for i, q in zip(i_data, q_data):
+                            self.plot_data['i_constellation'].append(i)
+                            self.plot_data['q_constellation'].append(q)
+                        
+                        print(f"Added {len(i_data)} constellation points")
                     else:
                         print("Empty constellation data")
                 
