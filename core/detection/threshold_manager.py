@@ -47,7 +47,9 @@ class DynamicThresholdManager:
             # Use lower percentile and margin for more sensitivity
             'base_percentile': 95.0,
             # Threshold uses percentile of training errors
-            'safety_margin': 1.0
+            'safety_margin': 1.0,
+            # Minimum number of samples before threshold is considered
+            'min_samples': 50,
         }
     
     def update(self, error: float, is_learning: bool = False) -> None:
@@ -76,7 +78,8 @@ class DynamicThresholdManager:
             Current threshold value
         """
         # Only return a threshold after learning completes and stable_threshold is set
-        if self.is_learning or self.stable_threshold is None:
+        min_s = self.config.get('min_samples', 0)
+        if self.is_learning or self.stable_threshold is None or len(self.errors) < min_s:
             return float('inf')
         return self.stable_threshold
     

@@ -163,17 +163,14 @@ class SignalPreprocessor:
         else:
             raise ValueError(f"Unknown normalization method: {norm_method}")
         
-        # Convert to tensor
+        # Convert to tensor with channels first (batch, channels, length)
         dtype = torch.float16 if self.device.type == 'cuda' else torch.float32
-        iq_tensor = torch.stack(
-            [torch.from_numpy(i_norm), torch.from_numpy(q_norm)], dim=1
-        ).to(
-            dtype=dtype,
-            device=self.device
-        )
-        
-        return iq_tensor.unsqueeze(0)
-        return iq_tensor.unsqueeze(0)
+        # Stack I and Q as separate channels
+        tensor_i = torch.from_numpy(i_norm)
+        tensor_q = torch.from_numpy(q_norm)
+        iq_tensor = torch.stack([tensor_i, tensor_q], dim=0)  # (2, length)
+        iq_tensor = iq_tensor.unsqueeze(0).to(dtype=dtype, device=self.device)  # (1,2,length)
+        return iq_tensor
     
     def extract_spectral_features(self, i_data: np.ndarray, q_data: np.ndarray) -> Dict[str, float]:
         """
