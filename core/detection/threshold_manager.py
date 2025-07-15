@@ -44,12 +44,17 @@ class DynamicThresholdManager:
     def _default_config(self) -> Dict:
         """Get default configuration."""
         return {
-            'base_percentile': 99.0,
+            # Use lower percentile and margin for more sensitivity
+            'base_percentile': 95.0,
             'adaptation_rate': 0.01,
-            'min_samples': 100,
-            'ema_alpha': 0.05,
-            'safety_margin': 1.5,
-            'min_threshold_ratio': 0.8
+            # Require fewer samples before threshold becomes active
+            'min_samples': 50,
+            # Increase EMA alpha for faster adaptation
+            'ema_alpha': 0.1,
+            # Remove extra margin to follow waveform closely
+            'safety_margin': 1.0,
+            # Allow threshold to adapt down to half of stable value
+            'min_threshold_ratio': 0.5
         }
     
     def update(self, error: float, is_learning: bool = False) -> None:
