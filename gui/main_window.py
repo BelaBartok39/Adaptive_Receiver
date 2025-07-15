@@ -33,19 +33,19 @@ class AdaptiveReceiverGUI:
             port: UDP port for receiving data (optional if using SimpleJammingDetector)
             window_title: Title for the main window
         """
-        # Handle both SimpleJammingDetector and raw AnomalyDetector
-        if hasattr(detector_or_wrapper, 'detector'):
-            # This is a SimpleJammingDetector wrapper
-            self.simple_detector = detector_or_wrapper
+        # Distinguish between a wrapper (with its own networking) and a raw detector
+        if hasattr(detector_or_wrapper, 'simple_detector'):
+            # Use the provided wrapper to handle networking
+            self.simple_detector = detector_or_wrapper.simple_detector
             self.detector = detector_or_wrapper.detector
-            self.port = port or detector_or_wrapper.port
-            self.use_external_socket = True  # SimpleJammingDetector handles networking
+            self.port = port or getattr(detector_or_wrapper, 'port', 12345)
+            self.use_external_socket = True
         else:
-            # This is a raw AnomalyDetector
+            # Raw detector: GUI will bind its own socket
             self.simple_detector = None
             self.detector = detector_or_wrapper
             self.port = port or 12345
-            self.use_external_socket = False  # We handle networking
+            self.use_external_socket = False
         
         self.running = False
         

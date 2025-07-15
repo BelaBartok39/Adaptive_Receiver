@@ -82,12 +82,12 @@ class SimpleJammingDetector:
         print(f"Buffer size: {self.network_config.get('buffer_size', 65536)}")
         print(f"Preprocessing: {self.detector_config['preprocessing']['normalization']} normalization")
     
-    def _on_data_received(self, packet_data: dict):
+    def _on_data_received(self, packet_data: Dict):
         """
         Callback for when data is received from network.
         
         Args:
-            packet_data: dictionary with timestamp, samples, num_samples
+            packet_data: Dictionary with timestamp, samples, num_samples
         """
         samples = packet_data['samples']
         if len(samples) > 0:
@@ -154,7 +154,7 @@ class SimpleJammingDetector:
         except Exception as e:
             print(f"\nProcessing error: {e}")
     
-    def _handle_jamming(self, confidence: float, metrics: dict):
+    def _handle_jamming(self, confidence: float, metrics: Dict):
         """
         Handle jamming detection.
         
@@ -269,42 +269,72 @@ def main():
     args = parser.parse_args()
     
     try:
+        # Initialize detector with config-based settings
+        detector = SimpleJammingDetector(port=args.port, window_size=args.window)
+        
+        # Load pre-trained model if specified
+        if args.model:
+            print(f"Loading pre-trained model from {args.model}")
+            detector.detector.load_model(args.model)
+        
         print("\nStarting RF Jamming Detector with VAE...")
         print("Press Ctrl+C to stop")
         print("-" * 50)
-        # GUI mode: skip wrapper to avoid port conflict
+        
+        # Choose interface mode
         if args.gui and not args.no_gui:
+            # Launch GUI
             try:
-                from core.detection.anomaly_detector import AnomalyDetector
                 from gui.main_window import AdaptiveReceiverGUI
-                # Instantiate raw detector
-                raw_detector = AnomalyDetector(
-                    window_size=args.window or args.window,
-                    config=load_detector_config()
-                )
-                # Load model if provided
-                if args.model:
-                    print(f"Loading pre-trained model from {args.model}")
-                    raw_detector.load_model(args.model)
+                
                 print("Launching GUI interface...")
-                gui = AdaptiveReceiverGUI(raw_detector, port=args.port)
-                gui.start_detection()
+                
+                # Create a wrapper that makes SimpleJammingDetector compatible with GUI
+                class DetectorWrapper:
+                    def __init__(self, simple_detector):
+                        self.detector = simple_detector.detector
+                        self.port = simple_detector.port
+                        self.simple_detector = simple_detector
+                        self.window_size = simple_detector.window_size
+                        
+                        # The simple detector is already initialized and will handle everything
+                        self.running = True
+                        
+                    def start(self):
+                        """Start the detector in background thread."""
+                        self.receive_thread = threading.Thread(
+                            target=self._run_detector, 
+                            daemon=True
+                        )
+                        self.receive_thread.start()
+
+                    def _run_detector(self):
+                        """Run the detector in background."""
+                        try:
+                            self.simple_detector.start()
+                        except Exception as e:
+                            print(f"Detector error: {e}")
+                            import traceback
+                            traceback.print_exc()
+                
+                # Create wrapper and GUI
+                wrapper = DetectorWrapper(detector)
+                gui = AdaptiveReceiverGUI(
+                    wrapper,
+                    window_title="RF Jamming Detector with VAE"
+                )
+                
+                # Start the GUI main loop
                 gui.run()
-            except Exception as e:
+                
+            except ImportError as e:
                 print(f"GUI not available: {e}")
                 print("Falling back to command-line interface...")
-                # CLI wrapper
-                detector = SimpleJammingDetector(port=args.port, window_size=args.window)
-                if args.model:
-                    detector.detector.load_model(args.model)
                 detector.start()
         else:
-            # Command-line interface with wrapper
-            detector = SimpleJammingDetector(port=args.port, window_size=args.window)
-            if args.model:
-                print(f"Loading pre-trained model from {args.model}")
-                detector.detector.load_model(args.model)
+            # Command-line interface
             detector.start()
+        
     except FileNotFoundError as e:
         print(f"Configuration file not found: {e}")
         print("Make sure you're running from the correct directory with config files.")
@@ -312,9 +342,9 @@ def main():
         print("\nShutdown requested...")
     except Exception as e:
         print(f"Error: {e}")
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
     finally:
-        # Graceful shutdown
         if 'detector' in locals():
             detector.stop()
 
