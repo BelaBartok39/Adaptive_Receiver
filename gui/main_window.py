@@ -34,14 +34,16 @@ class AdaptiveReceiverGUI:
             window_title: Title for the main window
         """
         # Distinguish between a wrapper (with its own networking) and a raw detector
+        # Handle wrapper vs. raw detector
+        # If passed a DetectorWrapper, it has attribute simple_detector
         if hasattr(detector_or_wrapper, 'simple_detector'):
-            # Use the provided wrapper to handle networking
+            # External wrapper (e.g., DetectorWrapper) handles its own networking
             self.simple_detector = detector_or_wrapper.simple_detector
             self.detector = detector_or_wrapper.detector
             self.port = port or getattr(detector_or_wrapper, 'port', 12345)
             self.use_external_socket = True
         else:
-            # Raw detector: GUI will bind its own socket
+            # Raw detector: GUI will create and bind its own socket
             self.simple_detector = None
             self.detector = detector_or_wrapper
             self.port = port or 12345
@@ -188,11 +190,15 @@ class AdaptiveReceiverGUI:
             self.running = True
             
             if self.use_external_socket:
-                # Let SimpleJammingDetector handle everything
-                # Just start the plot updates
+                # Start the external detector wrapper
+                try:
+                    self.simple_detector.start()
+                except Exception:
+                    pass
+                # Start plot updates
                 self.plot_manager.start_animation()
                 self.control_panel.on_detection_started()
-                print("GUI connected to SimpleJammingDetector")
+                print("GUI connected to external detector wrapper and started detection")
             else:
                 # Start our own data reception thread
                 self.receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
