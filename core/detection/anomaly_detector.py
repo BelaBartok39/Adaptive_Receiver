@@ -64,7 +64,7 @@ class AnomalyDetector:
             except ImportError:
                 # Fallback for older PyTorch versions
                 from torch.cuda.amp import GradScaler
-                self.scaler = GradScaler()
+                self.scaler = torch.amp.GradScaler('cuda')
         else:
             self.scaler = None
         
@@ -132,9 +132,9 @@ class AnomalyDetector:
         )
         model.to(self.device)
         
-        # Enable mixed precision if available
-        if self.device.type == 'cuda':
-            model.half()
+        # Don't use half precision on Jetson devices to avoid numerical issues
+        # if self.device.type == 'cuda':
+        #     model.half()
         
         return model
     
@@ -151,26 +151,39 @@ class AnomalyDetector:
         """
         self.sample_count += 1
         
-        # Preprocess data
-        iq_tensor = self.preprocessor.preprocess_iq(i_data, q_data)
-        
-        # Get model output
-        with torch.no_grad():
-            if self.device.type == 'cuda':
-                try:
-                    from torch.amp import autocast
-                    with autocast('cuda'):
-                        anomaly_score = self.model.get_anomaly_score(iq_tensor)
-                except ImportError:
-                    # Fallback for older PyTorch versions
-                    from torch.cuda.amp import autocast
-                    with autocast():
-                        anomaly_score = self.model.get_anomaly_score(iq_tensor)
-            else:
-                anomaly_score = self.model.get_anomaly_score(iq_tensor)
-        
-        # Convert to scalar
-        error = float(anomaly_score.cpu().numpy()[0])
+        try:
+            # Preprocess data
+            iq_tensor = self.preprocessor.preprocess_iq(i_data, q_data)
+            print(f"Preprocessed tensor: shape={iq_tensor.shape}, dtype={iq_tensor.dtype}, device={iq_tensor.device}")
+            
+            # Get model output
+            with torch.no_grad():
+                if self.device.type == 'cuda':
+                    try:
+                        from torch.amp import autocast
+                        with autocast('cuda'):
+                            anomaly_score = self.model.get_anomaly_score(iq_tensor)
+                    except ImportError:
+                        # Fallback for older PyTorch versions
+                        from torch.cuda.amp import autocast
+                        with torch.amp.autocast('cuda'):
+                            anomaly_score = self.model.get_anomaly_score(iq_tensor)
+                else:
+                    anomaly_score = self.model.get_anomaly_score(iq_tensor)
+            
+            # Convert to scalar and ensure it's a valid number
+            error = float(anomaly_score.cpu().numpy()[0])
+            if np.isnan(error) or np.isinf(error):
+                print(f"Warning: Invalid error value {error}, using default")
+                error = 0.001
+            
+            print(f"Computed error: {error:.6f}")
+            
+        except Exception as e:
+            print(f"Error in detection: {e}")
+            import traceback
+            traceback.print_exc()
+            error = 0.001  # Use default error value
         
         # Update threshold manager
         self.threshold_manager.update(error, is_learning=self.is_learning)
@@ -247,7 +260,7 @@ class AnomalyDetector:
             except ImportError:
                 # Fallback for older PyTorch versions
                 from torch.cuda.amp import autocast
-                with autocast():
+                with torch.amp.autocast('cuda'):
                     reconstruction, mu, logvar = self.model(batch)
                     loss_dict = self.model.loss_function(batch, reconstruction, mu, logvar)
                     loss = loss_dict['loss']

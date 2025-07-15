@@ -149,7 +149,17 @@ class AdaptiveReceiverGUI:
             try:
                 # Get data from queue with timeout
                 i_window, q_window, timestamp = self.process_queue.get(timeout=0.1)
-                print(f"Processing window in GPU thread")
+                print(f"Processing window in GPU thread: i_shape={i_window.shape}, q_shape={q_window.shape}")
+                print(f"Data ranges: i=[{i_window.min():.3f}, {i_window.max():.3f}], q=[{q_window.min():.3f}, {q_window.max():.3f}]")
+                
+                # Ensure data is not empty and has valid values
+                if len(i_window) == 0 or len(q_window) == 0:
+                    print("Empty window data, skipping")
+                    continue
+                    
+                if np.any(np.isnan(i_window)) or np.any(np.isnan(q_window)):
+                    print("NaN values in window data, skipping")
+                    continue
                 
                 # Process on GPU
                 is_anomaly, confidence, metrics = self.detector.detect(i_window, q_window)
@@ -204,6 +214,8 @@ class AdaptiveReceiverGUI:
                 result = self.result_queue.get_nowait()
                 results_processed += 1
                 
+                print(f"GUI processing result {results_processed}: error={result['error']:.6f}, anomaly={result['is_anomaly']}")
+                
                 # Update plot data
                 current_time = self.detector.sample_count
                 self.plot_data['time'].append(current_time)
@@ -211,22 +223,34 @@ class AdaptiveReceiverGUI:
                 
                 # Get current threshold
                 threshold = self.detector.threshold_manager.get_threshold()
+                print(f"Current threshold: {threshold}")
+                
                 # Handle learning mode display
                 if threshold == float('inf'):
                     # During learning, show a reasonable threshold for visualization
                     if len(self.plot_data['error']) > 10:
                         recent_errors = list(self.plot_data['error'])[-50:]
-                        threshold = np.mean(recent_errors) + 2 * np.std(recent_errors)
+                        if len(recent_errors) > 0 and not all(e == 0 for e in recent_errors):
+                            threshold = np.mean(recent_errors) + 2 * np.std(recent_errors)
+                        else:
+                            threshold = max(result['error'] * 1.5, 0.001)  # Ensure non-zero
                     else:
-                        threshold = result['error'] * 1.5
+                        threshold = max(result['error'] * 1.5, 0.001)  # Ensure non-zero
                 
                 self.plot_data['threshold'].append(threshold)
                 self.plot_data['detections'].append(result['is_anomaly'])
                 
-                # Update constellation data (less frequently)
+                # Update constellation data (less frequently) - fix empty data issue
                 if self.update_counter % 5 == 0:
-                    self.plot_data['i_constellation'].extend(result['i_data'])
-                    self.plot_data['q_constellation'].extend(result['q_data'])
+                    i_data = result['i_data']
+                    q_data = result['q_data']
+                    print(f"Updating constellation: i_len={len(i_data)}, q_len={len(q_data)}")
+                    if len(i_data) > 0 and len(q_data) > 0:
+                        print(f"Constellation ranges: i=[{np.min(i_data):.3f}, {np.max(i_data):.3f}], q=[{np.min(q_data):.3f}, {np.max(q_data):.3f}]")
+                        self.plot_data['i_constellation'].extend(i_data)
+                        self.plot_data['q_constellation'].extend(q_data)
+                    else:
+                        print("Empty constellation data")
                 
                 # Handle detection logging
                 if result['is_anomaly'] and not self.detector.is_learning:
@@ -246,9 +270,21 @@ class AdaptiveReceiverGUI:
                 break
             except Exception as e:
                 print(f"GUI update error: {e}")
+                import traceback
+                traceback.print_exc()
                 break
         
         self.update_counter += 1
+        
+        # Debug plot data status every 50 updates
+        if self.update_counter % 50 == 0:
+            print(f"Plot data status:")
+            print(f"  - Time points: {len(self.plot_data['time'])}")
+            print(f"  - Error points: {len(self.plot_data['error'])}")
+            print(f"  - Constellation I: {len(self.plot_data['i_constellation'])}")
+            print(f"  - Constellation Q: {len(self.plot_data['q_constellation'])}")
+            if len(self.plot_data['error']) > 0:
+                print(f"  - Error range: [{min(self.plot_data['error']):.6f}, {max(self.plot_data['error']):.6f}]")
     
     def setup_gui(self):
         """Create and layout GUI components."""

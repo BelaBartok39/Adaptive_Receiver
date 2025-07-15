@@ -97,10 +97,18 @@ class DynamicThresholdManager:
             Calculated threshold value
         """
         if len(self.learning_errors) < self.config['min_samples']:
-            print(f"Warning: Only {len(self.learning_errors)} samples for threshold calculation")
-            return float('inf')
-        
+            print(f"Warning: Only {len(self.learning_errors)} samples for threshold calculation (min: {self.config['min_samples']})")
+            if len(self.learning_errors) == 0:
+                print("No learning samples available, returning default threshold")
+                return 0.1  # Return a reasonable default instead of inf
+            
         errors_array = np.array(self.learning_errors)
+        print(f"Learning errors array: shape={errors_array.shape}, range=[{errors_array.min():.6f}, {errors_array.max():.6f}]")
+        
+        # Check for all-zero or very small errors
+        if np.all(errors_array < 1e-10):
+            print("Warning: All learning errors are extremely small, using default threshold")
+            return 0.001
         
         # Remove outliers using IQR method
         q1 = np.percentile(errors_array, 25)
@@ -120,6 +128,11 @@ class DynamicThresholdManager:
         self.learning_mean = np.mean(filtered_errors)
         self.learning_std = np.std(filtered_errors)
         
+        # Ensure we don't get zero values
+        if self.learning_std < 1e-10:
+            self.learning_std = self.learning_mean * 0.1  # Use 10% of mean as std
+            print(f"Standard deviation too small, adjusted to {self.learning_std:.6f}")
+        
         # Calculate threshold using percentile method
         percentile_value = np.percentile(filtered_errors, self.config['percentile'])
         
@@ -127,15 +140,15 @@ class DynamicThresholdManager:
         margin = self.config['margin_multiplier']
         std_threshold = self.learning_mean + margin * self.learning_std
         
-        # Use the maximum of both methods for safety
-        threshold = max(percentile_value, std_threshold)
+        # Use the maximum of both methods for safety, but ensure minimum threshold
+        threshold = max(percentile_value, std_threshold, self.learning_mean * 1.2, 0.001)
         
         print(f"Threshold calculation:")
         print(f"  - Samples: {len(self.learning_errors)} total, {len(filtered_errors)} after filtering")
-        print(f"  - Mean: {self.learning_mean:.4f}, Std: {self.learning_std:.4f}")
-        print(f"  - {self.config['percentile']}th percentile: {percentile_value:.4f}")
-        print(f"  - Mean + {margin}*std: {std_threshold:.4f}")
-        print(f"  - Final threshold: {threshold:.4f}")
+        print(f"  - Mean: {self.learning_mean:.6f}, Std: {self.learning_std:.6f}")
+        print(f"  - {self.config['percentile']}th percentile: {percentile_value:.6f}")
+        print(f"  - Mean + {margin}*std: {std_threshold:.6f}")
+        print(f"  - Final threshold: {threshold:.6f}")
         
         return threshold
     
