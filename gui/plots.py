@@ -12,7 +12,6 @@ from tkinter import ttk
 import numpy as np
 from collections import deque
 from typing import Dict, List, Optional
-import time
 
 
 class PlotManager:
@@ -50,9 +49,9 @@ class PlotManager:
         self.setup_plots()
         
         # Optimization flags
-        self.last_draw_time = 0
-        self.min_draw_interval = 0.1  # 10 FPS for plots
         self.update_counter = 0
+        self._update_scheduled = False
+        self.min_draw_interval_ms = 100  # 10 FPS for plots
         
         # Draw initial empty plots
         self.canvas.draw()
@@ -115,12 +114,11 @@ class PlotManager:
     
     def update_plots(self, frame=None):
         """Update all plots with current data."""
-        current_time = time.time()
-        
-        # Rate limit updates
-        if current_time - self.last_draw_time < self.min_draw_interval:
+        if self._update_scheduled:
             return
-        
+        self._update_scheduled = True
+        self.parent.after(self.min_draw_interval_ms, self._reset_update_scheduled)
+
         self.update_counter += 1
         
         try:
@@ -142,13 +140,15 @@ class PlotManager:
             
             # Single canvas update
             self.canvas.draw_idle()
-            self.last_draw_time = current_time
             
         except Exception as e:
             print(f"Plot update error: {e}")
             import traceback
             traceback.print_exc()
     
+    def _reset_update_scheduled(self):
+        self._update_scheduled = False
+
     def update_error_plot(self):
         """Update the error and threshold plot."""
         # Get data
@@ -174,8 +174,8 @@ class PlotManager:
             self.ax_error.set_xlim(time_data[0], time_data[-1])
             
             # Filter out infinities for y-axis scaling
-            valid_errors = [e for e in error_data if e < float('inf')]
-            valid_thresholds = [t for t in threshold_data if t < float('inf')]
+            valid_errors = [e for e in error_data if np.isfinite(e)]
+            valid_thresholds = [t for t in threshold_data if np.isfinite(t)]
             
             if valid_errors:
                 all_values = valid_errors + valid_thresholds
@@ -226,7 +226,7 @@ class PlotManager:
         max_points = 500
         if len(i_data) > max_points:
             # Take evenly spaced points
-            step = len(i_data) // max_points
+            step = max(1, len(i_data) // max_points)
             i_data = i_data[::step]
             q_data = q_data[::step]
         
@@ -234,9 +234,10 @@ class PlotManager:
         points = np.column_stack([i_data, q_data])
         self.constellation_scatter.set_offsets(points)
         
-        # Color by recency (optional)
-        colors = np.linspace(0.3, 1.0, len(i_data))
-        self.constellation_scatter.set_array(colors)
+        # Note: Setting an array here does not affect point colors unless a colormap is set for the scatter plot.
+        # If you want to color by recency, create the scatter with a colormap and pass 'c=colors' and 'cmap' arguments.
+        # colors = np.linspace(0.3, 1.0, len(i_data))
+        # self.constellation_scatter.set_array(colors)
         
         # Auto-scale
         if i_data and q_data:
@@ -252,7 +253,7 @@ class PlotManager:
         psd = self.plot_data.get('spec_psd')
         
         if freqs is not None and psd is not None and len(freqs) > 0:
-            # Convert to dB
+            psd_db = 10 * np.log10(np.clip(psd, 0, None) + 1e-10)
             psd_db = 10 * np.log10(psd + 1e-10)
             
             self.spectral_line.set_data(freqs, psd_db)
@@ -274,8 +275,7 @@ class PlotManager:
             self.update_plots,
             interval=100,  # Update every 100ms (10 FPS)
             blit=False,
-            cache_frame_data=False,
-            save_count=0  # Don't save any frames
+            cache_frame_data=False
         )
         
         print("Plot animation started")
@@ -284,8 +284,6 @@ class PlotManager:
         """Stop the plot animation."""
         if self.animation is not None:
             self.animation.event_source.stop()
-            if hasattr(self.animation, '_stop'):
-                self.animation._stop()
             self.animation = None
             print("Plot animation stopped")
     
@@ -371,7 +369,7 @@ class ConstellationPlot:
         # Limit points for performance
         max_points = 500
         if len(i_data) > max_points:
-            step = len(i_data) // max_points
+            step = max(1, len(i_data) // max_points)
             i_data = i_data[::step]
             q_data = q_data[::step]
         

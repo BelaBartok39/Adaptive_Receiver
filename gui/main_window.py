@@ -29,13 +29,14 @@ from .widgets import StatusPanel, ControlPanel, StatisticsPanel
 class AdaptiveReceiverGUI:
     """Direct GUI for the Adaptive RF Receiver with optimized performance."""
     
-    def __init__(self, port: int = None, window_size: int = None):
+    def __init__(self, port: int = None, window_size: int = None, auto_start: bool = True):
         """
         Initialize the GUI with direct detector integration.
         
         Args:
             port: UDP port to listen on (overrides config)
             window_size: Size of processing windows (overrides config)
+            auto_start: If True, detection starts automatically when GUI launches.
         """
         # Load configurations
         self.network_config = load_network_config()
@@ -136,7 +137,10 @@ class AdaptiveReceiverGUI:
         
         # Ensure CUDA context is created in this thread
         if self.detector.device.type == 'cuda':
-            torch.cuda.set_device(self.detector.device)
+            device = self.detector.device
+            if isinstance(device, str):
+                device = torch.device(device)
+            torch.cuda.set_device(device.index if device.index is not None else 0)
         
         while self.running:
             try:
@@ -311,9 +315,13 @@ class AdaptiveReceiverGUI:
             threshold_stats = self.detector.threshold_manager.get_statistics()
             final_threshold = threshold_stats.get('current_threshold', 'Unknown')
             
+            if isinstance(final_threshold, float):
+                threshold_str = f"{final_threshold:.4f}"
+            else:
+                threshold_str = str(final_threshold)
             message = (f"Learning complete!\n"
                       f"Samples processed: {stats['samples_processed']:,}\n"
-                      f"Final threshold: {final_threshold:.4f}\n"
+                      f"Final threshold: {threshold_str}\n"
                       f"Mean error: {threshold_stats.get('mean', 0):.4f}\n"
                       f"Std deviation: {threshold_stats.get('std', 0):.4f}")
             
@@ -390,11 +398,9 @@ class AdaptiveReceiverGUI:
             'threshold': "Learning..." if threshold == float('inf') else f"{threshold:.4f}",
             'fps': f"{fps:.1f}",
             'gpu_memory': f"{gpu_memory:.1f} MB",
-            'detection_rate': f"{detection_rate:.1f}%",
-            'status': status,
-            'status_color': status_color
+            'detection_rate': f"{detection_rate:.1f}%"
         }
-    
+
     def on_closing(self):
         """Handle window closing."""
         print("Closing GUI...")
@@ -402,14 +408,16 @@ class AdaptiveReceiverGUI:
             self.stop_detection()
         
         self.root.quit()
+        self.root.destroy()
     
     def run(self):
         """Start the GUI main loop."""
         print(f"Adaptive RF Receiver GUI ready on port {self.port}")
         print(f"Device: {self.detector.device}")
         
-        # Auto-start detection
-        self.root.after(100, self.start_detection)
+        # Optionally auto-start detection (configurable)
+        if getattr(self, 'auto_start', True):
+            self.root.after(100, self.start_detection)
         
         # Run main loop
         self.root.mainloop()
@@ -418,18 +426,25 @@ class AdaptiveReceiverGUI:
         self.root.destroy()
         print("GUI closed.")
 
-
 def main():
-    """Direct GUI launcher."""
+    """
+    Direct GUI launcher.
+
+    Note: This function auto-starts the GUI and detection upon launch.
+    """
     import argparse
     parser = argparse.ArgumentParser(description="Adaptive RF Receiver GUI")
     parser.add_argument('--port', type=int, help="UDP port")
     parser.add_argument('--window-size', type=int, help="Window size")
+    parser.add_argument('--no-auto-start', action='store_true', help="Do not auto-start detection")
     args = parser.parse_args()
     
-    gui = AdaptiveReceiverGUI(port=args.port, window_size=args.window_size)
+    gui = AdaptiveReceiverGUI(
+        port=args.port,
+        window_size=args.window_size,
+        auto_start=not args.no_auto_start
+    )
     gui.run()
-
 
 if __name__ == "__main__":
     main()

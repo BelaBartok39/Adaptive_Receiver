@@ -36,22 +36,26 @@ class AnomalyDetector:
         
         # Device selection
         self.device = self._select_device()
-        print(f"Anomaly detector using device: {self.device}")
+        import logging
+        logging.info(f"Anomaly detector using device: {self.device}")
+        self.logger = logging.getLogger(__name__)
+        self.logger.info(f"Anomaly detector using device: {self.device}")
         
         # Initialize components
         self.model = self._build_model()
         self.preprocessor = SignalPreprocessor(self.config.get('preprocessing', {}))
         self.threshold_manager = DynamicThresholdManager(
-            window_size=1000,
+            window_size=self.window_size,
             config=self.config.get('threshold', {})
         )
         
         # Optimizer and scaler for mixed precision
+        # Ensure optimizer is initialized after model.half()
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=self.config['training']['learning_rate']
         )
-        self.scaler = GradScaler() if self.device.type == 'cuda' else None
+        self.scaler = GradScaler('cuda') if self.device.type == 'cuda' else None
         
         # State tracking
         self.is_learning = False
@@ -66,7 +70,7 @@ class AnomalyDetector:
         
         # Model persistence
         self.model_dir = Path("models")
-        self.model_dir.mkdir(exist_ok=True)
+        self.model_dir.mkdir(parents=True, exist_ok=True)
         
         # Batch processing for efficiency
         self.batch_buffer = []
@@ -138,22 +142,28 @@ class AnomalyDetector:
         
         # Preprocess data
         iq_tensor = self.preprocessor.preprocess_iq(i_data, q_data)
+        # Convert input to half precision if using CUDA
+        if self.device.type == 'cuda':
+            iq_tensor = iq_tensor.half()
         
         # Get model output
         with torch.no_grad():
             if self.device.type == 'cuda':
-                with autocast():
+                with autocast('cuda'):
                     anomaly_score = self.model.get_anomaly_score(iq_tensor)
             else:
                 anomaly_score = self.model.get_anomaly_score(iq_tensor)
         
         # Convert to scalar
-        error = float(anomaly_score.cpu().numpy()[0])
-        
-        # Update threshold manager
-        self.threshold_manager.update(error, is_learning=self.is_learning)
-        
+        error = float(anomaly_score.item())
         # During learning, always update model
+        if self.is_learning:
+            # Ensure iq_tensor has batch dimension
+            if iq_tensor.dim() == 1:
+                iq_tensor = iq_tensor.unsqueeze(0)
+            self.batch_buffer.append(iq_tensor)
+            if len(self.batch_buffer) >= self.batch_size:
+                self._update_model_batch()
         if self.is_learning:
             self.batch_buffer.append(iq_tensor)
             if len(self.batch_buffer) >= self.batch_size:
@@ -211,12 +221,15 @@ class AnomalyDetector:
         # Stack tensors into batch
         batch = torch.cat(self.batch_buffer, dim=0)
         self.batch_buffer.clear()
+        # Convert batch to half precision if using CUDA
+        if self.device.type == 'cuda':
+            batch = batch.half()
         
         # Forward pass
         self.model.train()
         
         if self.device.type == 'cuda' and self.scaler:
-            with autocast():
+            with autocast('cuda'):
                 reconstruction, mu, logvar = self.model(batch)
                 loss_dict = self.model.loss_function(batch, reconstruction, mu, logvar)
                 loss = loss_dict['loss']
