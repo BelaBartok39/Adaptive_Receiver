@@ -15,7 +15,7 @@ import datetime
 from scipy import signal
 import numpy as np
 from collections import deque
-from typing import Optional, Union
+from typing import Optional, Union, Dict
 
 from .plots import PlotManager
 from .widgets import StatusPanel, ControlPanel, StatisticsPanel
@@ -98,79 +98,73 @@ class AdaptiveReceiverGUI:
     
     def _setup_simple_detector_hooks(self):
         """Hook into SimpleJammingDetector's processing pipeline."""
-        # Store original process_window method (robustly detect name)
-        orig = getattr(self.simple_detector, '_process_window', None)
-        if orig is None:
-            orig = getattr(self.simple_detector, 'process_window', None)
-        if orig is None:
-            print("No process_window method found on detector wrapper; GUI hooks disabled.")
-            return
-        original_process_window = orig
-
-        def hooked_process_window():
+        # Store reference to original method
+        original_process = self.simple_detector._process_window
+        
+        # Store reference to GUI for use in hook
+        gui_ref = self
+        
+        def hooked_process(i_array: np.ndarray, q_array: np.ndarray, timestamp: float):
             """Hooked version that updates GUI plots after processing."""
             try:
-                # Snapshot I/Q buffers before processing clears them
-                buf = list(self.simple_detector.i_buffer)
-                qb = list(self.simple_detector.q_buffer)
-                ws = self.simple_detector.window_size
-                if len(buf) < ws or len(qb) < ws:
-                    # Not enough data yet: still process but ignore errors
-                    try:
-                        original_process_window()
-                    except Exception:
-                        pass
-                    return
-                # Take window data
-                i_array = np.array(buf[:ws])
-                q_array = np.array(qb[:ws])
-                # Call original processing (which calls detect and clears buffers)
-                try:
-                    original_process_window()
-                except Exception:
-                    # Ignore FP16 unscale errors and others
-                    pass
-                # Retrieve last detection results stored by detector
-                is_jammed = getattr(self.detector, 'last_is_anomaly', None)
-                error = getattr(self.detector, 'last_error', None)
-                # Only update if valid
-                if is_jammed is None or error is None:
-                    return
-                # Compute spectral data for spectral plot
-                try:
-                    freqs, psd = signal.periodogram(i_array + 1j * q_array, scaling='density')
-                    self.plot_data['spec_freqs'] = freqs
-                    self.plot_data['spec_psd'] = psd
-                except Exception as _:
-                    pass
+                # Call original processing
+                original_process(i_array, q_array, timestamp)
+                
+                # After processing, update GUI data
+                # The detector should have updated its state
+                detector = gui_ref.simple_detector.detector
+                
+                # Get detection results from last detection
+                is_anomaly = False
+                error = 0.0
+                confidence = 0.0
+                
+                # Check if detector has recent detection history
+                if hasattr(detector, 'detection_history') and len(detector.detection_history) > 0:
+                    last_detection = detector.detection_history[-1]
+                    is_anomaly = last_detection.get('is_anomaly', False)
+                    error = last_detection.get('error', 0.0)
+                    confidence = last_detection.get('confidence', 0.0)
+                
                 # Update plot data
-                current_time = self.detector.sample_count
-                self.plot_data['time'].append(current_time)
-                self.plot_data['error'].append(error)
-                # Use actual adaptive threshold
-                # Freeze threshold after learning using stable_threshold to allow crossings
-                manager = self.detector.threshold_manager
-                if not self.detector.is_learning and manager.stable_threshold is not None:
-                    threshold = manager.stable_threshold
-                else:
-                    threshold = manager.get_threshold()
-                self.plot_data['threshold'].append(threshold)
-                self.plot_data['detections'].append(is_jammed)
-                # Update constellation using snapshot
+                current_time = detector.sample_count
+                gui_ref.plot_data['time'].append(current_time)
+                gui_ref.plot_data['error'].append(error)
+                
+                # Get threshold
+                threshold = detector.threshold_manager.get_threshold()
+                if threshold == float('inf'):
+                    threshold = error * 2  # For display during learning
+                gui_ref.plot_data['threshold'].append(threshold)
+                gui_ref.plot_data['detections'].append(is_anomaly)
+                
+                # Update constellation plot with actual I/Q data
                 if len(i_array) > 100:
                     step = len(i_array) // 100
-                    self.plot_data['i_constellation'].extend(i_array[::step])
-                    self.plot_data['q_constellation'].extend(q_array[::step])
+                    gui_ref.plot_data['i_constellation'].extend(i_array[::step])
+                    gui_ref.plot_data['q_constellation'].extend(q_array[::step])
                 else:
-                    self.plot_data['i_constellation'].extend(i_array)
-                    self.plot_data['q_constellation'].extend(q_array)
+                    gui_ref.plot_data['i_constellation'].extend(i_array[:100])  # Limit points
+                    gui_ref.plot_data['q_constellation'].extend(q_array[:100])
+                
+                # Compute spectral data
+                try:
+                    freqs, psd = signal.periodogram(i_array + 1j * q_array, scaling='density')
+                    gui_ref.plot_data['spec_freqs'] = freqs
+                    gui_ref.plot_data['spec_psd'] = psd
+                except Exception as e:
+                    print(f"Spectral calculation error: {e}")
+                
                 # Update performance counter
-                self.fps_counter.append(time.time())
+                gui_ref.fps_counter.append(time.time())
+                
             except Exception as e:
                 print(f"GUI hook error: {e}")
-
-        # Replace the method on the simple_detector
-        self.simple_detector._process_window = hooked_process_window
+                import traceback
+                traceback.print_exc()
+        
+        # Replace the method
+        self.simple_detector._process_window = hooked_process
     
     def setup_gui(self):
         """Create and layout GUI components."""
@@ -239,11 +233,13 @@ class AdaptiveReceiverGUI:
         # Schedule learning end
         def end_learning():
             if self.use_external_socket:
-                message = self.simple_detector.detector.stop_learning()
+                stats = self.simple_detector.detector.stop_learning()
+                message = f"Learning complete. Processed {stats['samples_processed']} samples"
             else:
-                message = self.detector.stop_learning()
+                stats = self.detector.stop_learning()
+                message = f"Learning complete. Processed {stats['samples_processed']} samples"
             self.control_panel.on_learning_stopped()
-            tkinter.messagebox.showinfo("Learning Complete", message)
+            tk.messagebox.showinfo("Learning Complete", message)
             
         self.root.after(duration * 1000, end_learning)
         
@@ -253,23 +249,23 @@ class AdaptiveReceiverGUI:
         """Save the current model."""
         try:
             path = self.detector.save_model()
-            tkinter.messagebox.showinfo("Success", f"Model saved to:\n{path}")
+            tk.messagebox.showinfo("Success", f"Model saved to:\n{path}")
         except Exception as e:
-            tkinter.messagebox.showerror("Error", f"Failed to save model:\n{str(e)}")
+            tk.messagebox.showerror("Error", f"Failed to save model:\n{str(e)}")
     
     def load_model(self):
         """Load a saved model."""
         try:
-            filename = tkinter.filedialog.askopenfilename(
+            filename = tk.filedialog.askopenfilename(
                 initialdir=self.detector.model_dir,
                 title="Select model file",
                 filetypes=[("PyTorch models", "*.pth"), ("All files", "*.*")]
             )
             if filename:
-                message = self.detector.load_model(filename)
-                tkinter.messagebox.showinfo("Success", message)
+                self.detector.load_model(filename)
+                tk.messagebox.showinfo("Success", "Model loaded successfully")
         except Exception as e:
-            tkinter.messagebox.showerror("Error", f"Failed to load model:\n{str(e)}")
+            tk.messagebox.showerror("Error", f"Failed to load model:\n{str(e)}")
     
     def _receive_loop(self):
         """Main data reception loop (only used when not using SimpleJammingDetector)."""
@@ -315,38 +311,25 @@ class AdaptiveReceiverGUI:
     
     def _process_window(self):
         """Process a window of I/Q samples (only used when not using SimpleJammingDetector)."""
-        # Ensure metrics variable is always defined
-        metrics = {}
         try:
             # Get processing window
             i_array = np.array(self.i_buffer[:self.detector.window_size])
             q_array = np.array(self.q_buffer[:self.detector.window_size])
             
             # Run detection
-            is_jammed, error, metrics = self.detector.detect(i_array, q_array)
+            is_anomaly, confidence, metrics = self.detector.detect(i_array, q_array)
             
-            # Compute spectral data for spectral plot
-            try:
-                freqs, psd = signal.periodogram(i_array + 1j * q_array, scaling='density')
-                self.plot_data['spec_freqs'] = freqs
-                self.plot_data['spec_psd'] = psd
-            except Exception:
-                pass
             # Update plot data
             current_time = self.detector.sample_count
             self.plot_data['time'].append(current_time)
-            self.plot_data['error'].append(error)
+            self.plot_data['error'].append(metrics.get('error', 0.0))
             
-            # Freeze threshold after learning for detection crossings
-            manager = self.detector.threshold_manager
-            if not self.detector.is_learning and manager.stable_threshold is not None:
-                threshold = manager.stable_threshold
-            else:
-                threshold = manager.get_threshold()
+            # Get threshold
+            threshold = self.detector.threshold_manager.get_threshold()
             if threshold == float('inf'):
-                threshold = error * 2  # For display purposes during learning
+                threshold = metrics.get('error', 0.0) * 2
             self.plot_data['threshold'].append(threshold)
-            self.plot_data['detections'].append(is_jammed)
+            self.plot_data['detections'].append(is_anomaly)
             
             # Update constellation data (subsample for performance)
             if len(i_array) > 100:
@@ -357,13 +340,21 @@ class AdaptiveReceiverGUI:
                 self.plot_data['i_constellation'].extend(i_array)
                 self.plot_data['q_constellation'].extend(q_array)
             
+            # Compute spectral data
+            try:
+                freqs, psd = signal.periodogram(i_array + 1j * q_array, scaling='density')
+                self.plot_data['spec_freqs'] = freqs
+                self.plot_data['spec_psd'] = psd
+            except Exception:
+                pass
+            
             # Update performance counters
             self.fps_counter.append(time.time())
             
             # Log significant detections
-            if is_jammed and not self.detector.is_learning:
+            if is_anomaly and not self.detector.is_learning:
                 timestamp_str = datetime.datetime.now().strftime('%H:%M:%S')
-                print(f"[{timestamp_str}] JAMMING DETECTED! Error: {error:.4f}, Threshold: {threshold:.4f}")
+                print(f"[{timestamp_str}] JAMMING DETECTED! Error: {metrics.get('error', 0):.4f}, Threshold: {threshold:.4f}")
             
             # Slide buffer
             self.i_buffer = self.i_buffer[self.detector.window_size:]
@@ -371,13 +362,17 @@ class AdaptiveReceiverGUI:
             
         except Exception as e:
             print(f"Processing error: {e}")
+            import traceback
+            traceback.print_exc()
     
     def get_statistics(self) -> dict:
         """Get current system statistics."""
         # Calculate FPS
         fps = 0
         if len(self.fps_counter) > 1:
-            fps = len(self.fps_counter) / (self.fps_counter[-1] - self.fps_counter[0])
+            time_diff = self.fps_counter[-1] - self.fps_counter[0]
+            if time_diff > 0:
+                fps = len(self.fps_counter) / time_diff
         
         # Get threshold info
         threshold_stats = self.detector.threshold_manager.get_statistics()
@@ -393,21 +388,14 @@ class AdaptiveReceiverGUI:
         gpu_memory = 0
         if hasattr(self.detector, 'device') and self.detector.device.type == 'cuda':
             try:
-                # Import torch only when needed
                 import torch
                 gpu_memory = torch.cuda.memory_allocated() / 1024 / 1024
-            except ImportError:
-                pass
-            except Exception:
+            except:
                 pass
         
-        # Get status from appropriate detector
-        if self.use_external_socket and hasattr(self.simple_detector, 'detector'):
-            status_info = self.simple_detector.detector.get_status()
-        else:
-            status_info = self.detector.get_status()
+        # Get status
+        status_info = self.detector.get_status()
             
-        # status_info is a dictionary
         if status_info.get('mode') == 'learning':
             status = f"Learning: {status_info.get('remaining_time', 0):.1f}s"
             status_color = 'orange'
@@ -432,36 +420,31 @@ class AdaptiveReceiverGUI:
         if self.running:
             self.stop_detection()
         
-        # If using SimpleJammingDetector wrapper, stop its receiving thread and socket
+        # If using SimpleJammingDetector wrapper, stop it
         if self.use_external_socket and self.simple_detector:
             try:
                 self.simple_detector.running = False
-                if hasattr(self.simple_detector, 'receive_thread'):
-                    self.simple_detector.receive_thread.join(timeout=1)
-            except Exception:
-                pass
-            try:
-                self.simple_detector.socket.close()
-            except Exception:
-                pass
+                if hasattr(self.simple_detector, 'process_thread'):
+                    self.simple_detector.process_thread.join(timeout=1)
+                if hasattr(self.simple_detector, 'receiver'):
+                    self.simple_detector.receiver.stop()
+            except Exception as e:
+                print(f"Error stopping detector: {e}")
+        
         # Close our own socket if created
         if not self.use_external_socket:
             try:
                 self.socket.close()
-            except Exception:
+            except:
                 pass
+        
         # Stop plot animation
         try:
             self.plot_manager.stop_animation()
-        except Exception:
+        except:
             pass
-        # Quit mainloop and exit
-        try:
-            self.root.quit()
-        except Exception:
-            pass
-        import sys; sys.exit(0)
         
+        # Destroy window
         self.root.destroy()
     
     def run(self):
@@ -474,5 +457,6 @@ class AdaptiveReceiverGUI:
             self.start_detection()
         else:
             print("Click 'Start Detection' to begin monitoring")
+        
         # Enter main loop
         self.root.mainloop()
