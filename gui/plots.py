@@ -1,12 +1,12 @@
 """
 Optimized matplotlib plotting for the Adaptive RF Receiver GUI.
-Uses blitting and efficient updates for better performance.
+Fixed animation and data display issues.
 """
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.animation import FuncAnimation  # Keep import to support persistent animation
+from matplotlib.animation import FuncAnimation
 import tkinter as tk
 from tkinter import ttk
 import numpy as np
@@ -16,13 +16,12 @@ import time
 
 
 class PlotManager:
-    """Optimized plot manager with GPU-friendly updates."""
+    """Optimized plot manager with proper animation handling."""
     
     def __init__(self, parent, plot_data: Dict):
         """Initialize the plot manager."""
         self.parent = parent
         self.plot_data = plot_data
-        # Placeholder for persistent animation
         self.animation = None
         
         # Create main frame
@@ -50,26 +49,13 @@ class PlotManager:
         # Initialize plots
         self.setup_plots()
         
-        # Animation will be created in start_animation()
-        self.animation = None
-        
         # Optimization flags
         self.last_draw_time = 0
-        self.min_draw_interval = 0.05  # Max 20 FPS for plots
+        self.min_draw_interval = 0.1  # 10 FPS for plots
+        self.update_counter = 0
         
-        # For efficient updates
-        self.backgrounds = {}
-        self.artists = {}
-        # Create and store FuncAnimation to prevent garbage collection warning
-        try:
-            self.animation = FuncAnimation(
-                self.fig, self.update_plots,
-                interval=50,  # 20 FPS max
-                blit=False,
-                cache_frame_data=False
-            )
-        except Exception as e:
-            print(f"Error creating FuncAnimation: {e}")
+        # Draw initial empty plots
+        self.canvas.draw()
     
     def setup_plots(self):
         """Initialize all plots with optimized settings."""
@@ -79,11 +65,11 @@ class PlotManager:
         self.ax_error.set_ylabel("Error Magnitude")
         self.ax_error.grid(True, alpha=0.3)
         
-        self.error_line, = self.ax_error.plot([], [], 'b-', linewidth=1.5, label='Error', animated=True)
-        self.threshold_line, = self.ax_error.plot([], [], 'r--', linewidth=2, label='Threshold', animated=True)
+        self.error_line, = self.ax_error.plot([], [], 'b-', linewidth=1.5, label='Error')
+        self.threshold_line, = self.ax_error.plot([], [], 'r--', linewidth=2, label='Threshold')
         self.ax_error.legend(loc='upper right')
-        self.ax_error.set_xlim(0, 500)
-        self.ax_error.set_ylim(0, 1)
+        self.ax_error.set_xlim(0, 100)
+        self.ax_error.set_ylim(0, 0.1)
         
         # Detection events plot
         self.ax_detections.set_title("Jamming Detection Events", fontsize=12, weight='bold')
@@ -93,9 +79,10 @@ class PlotManager:
         self.ax_detections.grid(True, alpha=0.3)
         self.ax_detections.set_yticks([0, 1])
         self.ax_detections.set_yticklabels(['Clean', 'Jammed'])
+        self.ax_detections.set_xlim(0, 100)
         
         # Detection scatter for efficiency
-        self.detection_scatter = self.ax_detections.scatter([], [], c='red', s=50, alpha=0.8, animated=True)
+        self.detection_scatter = self.ax_detections.scatter([], [], c='red', s=50, alpha=0.8)
         
         # Constellation plot
         self.ax_constellation.set_title("I/Q Constellation", fontsize=12, weight='bold')
@@ -108,7 +95,7 @@ class PlotManager:
         
         # Efficient constellation scatter
         self.constellation_scatter = self.ax_constellation.scatter(
-            [], [], s=1, alpha=0.6, c='blue', animated=True
+            [], [], s=1, alpha=0.6, c='blue'
         )
         
         # Reference circles
@@ -122,266 +109,197 @@ class PlotManager:
         self.ax_spectral.set_xlabel("Frequency Bin")
         self.ax_spectral.set_ylabel("Power (dB)")
         self.ax_spectral.grid(True, alpha=0.3)
-        self.spectral_line, = self.ax_spectral.plot([], [], 'm-', linewidth=1.5, animated=True)
+        self.spectral_line, = self.ax_spectral.plot([], [], 'm-', linewidth=1.5)
         self.ax_spectral.set_xlim(0, 1)
         self.ax_spectral.set_ylim(-60, 0)
-        
-        # Draw once to get backgrounds
-        self.fig.canvas.draw()
-        
-        # Store backgrounds for blitting
-        self.backgrounds = {
-            'error': self.fig.canvas.copy_from_bbox(self.ax_error.bbox),
-            'detections': self.fig.canvas.copy_from_bbox(self.ax_detections.bbox),
-            'constellation': self.fig.canvas.copy_from_bbox(self.ax_constellation.bbox),
-            'spectral': self.fig.canvas.copy_from_bbox(self.ax_spectral.bbox)
-        }
-        
-        # Store artists for efficient updates
-        self.artists = {
-            'error': [self.error_line, self.threshold_line],
-            'detections': [self.detection_scatter],
-            'constellation': [self.constellation_scatter],
-            'spectral': [self.spectral_line]
-        }
     
     def update_plots(self, frame=None):
-        """Optimized plot update using blitting."""
+        """Update all plots with current data."""
         current_time = time.time()
         
         # Rate limit updates
         if current_time - self.last_draw_time < self.min_draw_interval:
             return
         
+        self.update_counter += 1
+        
         try:
-            # Debug data status
-            frame_num = frame if frame is not None else 0
-            if frame_num % 50 == 0:  # Print every 50 frames
-                print(f"Plot data status:")
-                print(f"  - Time: {len(self.plot_data['time'])} points")
-                print(f"  - Error: {len(self.plot_data['error'])} points")
-                print(f"  - Threshold: {len(self.plot_data['threshold'])} points")
-                print(f"  - Detections: {len(self.plot_data['detections'])} points")
-                print(f"  - I constellation: {len(self.plot_data['i_constellation'])} points")
-                print(f"  - Q constellation: {len(self.plot_data['q_constellation'])} points")
-                
-                if len(self.plot_data['error']) > 0:
-                    print(f"  - Last error: {self.plot_data['error'][-1]:.6f}")
-                if len(self.plot_data['threshold']) > 0:
-                    print(f"  - Last threshold: {self.plot_data['threshold'][-1]:.6f}")
-            
             # Update error plot
-            if self.plot_data['time'] and self.plot_data['error']:
-                print(f"Updating error plot with {len(self.plot_data['error'])} points")
-                self.update_error_plot_fast()
-            else:
-                print("Skipping error plot - no data")
+            if len(self.plot_data['time']) > 0 and len(self.plot_data['error']) > 0:
+                self.update_error_plot()
             
             # Update detection plot
-            if self.plot_data['time'] and self.plot_data['detections']:
-                print(f"Updating detection plot with {len(self.plot_data['detections'])} points")
-                self.update_detection_plot_fast()
-            else:
-                print("Skipping detection plot - no data")
+            if len(self.plot_data['time']) > 0 and len(self.plot_data['detections']) > 0:
+                self.update_detection_plot()
             
-            # Update constellation (less frequently)
-            if len(self.plot_data['i_constellation']) > 50:
-                print(f"Updating constellation plot")
-                self.update_constellation_plot_fast()
-            else:
-                print(f"Skipping constellation - only {len(self.plot_data['i_constellation'])} points")
+            # Update constellation less frequently
+            if self.update_counter % 5 == 0 and len(self.plot_data['i_constellation']) > 0:
+                self.update_constellation_plot()
             
-            # Update spectral (least frequently)
-            if self.plot_data.get('spec_freqs') is not None:
-                print(f"Updating spectral plot")
-                self.update_spectral_plot_fast()
-            else:
-                print("Skipping spectral - no frequency data")
+            # Update spectral least frequently
+            if self.update_counter % 10 == 0 and self.plot_data.get('spec_freqs') is not None:
+                self.update_spectral_plot()
             
+            # Single canvas update
+            self.canvas.draw_idle()
             self.last_draw_time = current_time
             
         except Exception as e:
             print(f"Plot update error: {e}")
             import traceback
             traceback.print_exc()
-        finally:
-            # Centralized canvas draw - only one draw call per update cycle
-            try:
-                self.canvas.draw()
-            except Exception as draw_err:
-                print(f"Canvas draw error: {draw_err}")
     
-    def update_error_plot_fast(self):
-        """Fast error plot update using blitting."""
-        time_data = np.array(self.plot_data['time'])
-        error_data = np.array(self.plot_data['error'])
-        threshold_data = np.array(self.plot_data['threshold'])
+    def update_error_plot(self):
+        """Update the error and threshold plot."""
+        # Get data
+        time_data = list(self.plot_data['time'])
+        error_data = list(self.plot_data['error'])
+        threshold_data = list(self.plot_data['threshold'])
         
-        print(f"Error plot update: time={len(time_data)}, error={len(error_data)}, threshold={len(threshold_data)}")
+        # Ensure same length
+        min_len = min(len(time_data), len(error_data), len(threshold_data))
+        if min_len == 0:
+            return
+            
+        time_data = time_data[-min_len:]
+        error_data = error_data[-min_len:]
+        threshold_data = threshold_data[-min_len:]
         
-        if len(time_data) > 0:
-            print(f"  - Time range: [{time_data[0]}, {time_data[-1]}]")
-            print(f"  - Error range: [{np.min(error_data):.6f}, {np.max(error_data):.6f}]")
-            print(f"  - Threshold range: [{np.min(threshold_data):.6f}, {np.max(threshold_data):.6f}]")
+        # Update lines
+        self.error_line.set_data(time_data, error_data)
+        self.threshold_line.set_data(time_data, threshold_data)
+        
+        # Update limits
+        if len(time_data) > 1:
+            self.ax_error.set_xlim(time_data[0], time_data[-1])
             
-            # Update data
-            self.error_line.set_data(time_data, error_data)
-            self.threshold_line.set_data(time_data, threshold_data)
+            # Filter out infinities for y-axis scaling
+            valid_errors = [e for e in error_data if e < float('inf')]
+            valid_thresholds = [t for t in threshold_data if t < float('inf')]
             
-            # Update limits if needed
-            if len(time_data) > 1:
-                self.ax_error.set_xlim(time_data[0], time_data[-1])
-                
-                # Dynamic y-limits
-                valid_errors = error_data[error_data < float('inf')]
-                valid_thresholds = threshold_data[threshold_data < float('inf')]
-                
-                if len(valid_errors) > 0:
-                    y_max = max(np.max(valid_errors), 
-                               np.max(valid_thresholds) if len(valid_thresholds) > 0 else 1) * 1.1
-                    print(f"  - Setting y_max to: {y_max}")
-                    self.ax_error.set_ylim(0, y_max)
-            
-            # Plot data updated - canvas.draw() will be called by update_plots()
-        else:
-            print("  - No time data to plot")
+            if valid_errors:
+                all_values = valid_errors + valid_thresholds
+                y_min = min(0, min(all_values) * 0.9)
+                y_max = max(all_values) * 1.1
+                self.ax_error.set_ylim(y_min, y_max)
     
-    def update_detection_plot_fast(self):
-        """Fast detection plot update."""
-        time_data = np.array(self.plot_data['time'])
-        detection_data = np.array(self.plot_data['detections'])
+    def update_detection_plot(self):
+        """Update the detection events plot."""
+        time_data = list(self.plot_data['time'])
+        detection_data = list(self.plot_data['detections'])
         
-        print(f"Detection plot update: time={len(time_data)}, detections={len(detection_data)}")
+        # Ensure same length
+        min_len = min(len(time_data), len(detection_data))
+        if min_len == 0:
+            return
+            
+        time_data = time_data[-min_len:]
+        detection_data = detection_data[-min_len:]
         
-        # Get detection times
-        detection_indices = np.where(detection_data)[0]
-        if len(detection_indices) > 0:
-            detection_times = time_data[detection_indices]
-            detection_y = np.ones_like(detection_times) * 0.5
-            
-            print(f"  - Found {len(detection_times)} detections")
-            
-            # Update scatter data
+        # Find detection points
+        detection_times = []
+        for i, det in enumerate(detection_data):
+            if det:
+                detection_times.append(time_data[i])
+        
+        # Update scatter plot
+        if detection_times:
+            detection_y = [0.5] * len(detection_times)
             self.detection_scatter.set_offsets(np.column_stack([detection_times, detection_y]))
         else:
-            print("  - No detections to plot")
             self.detection_scatter.set_offsets(np.empty((0, 2)))
         
         # Update x-limits to match error plot
         if len(time_data) > 1:
             self.ax_detections.set_xlim(time_data[0], time_data[-1])
-        
-        # Plot data updated - canvas.draw() will be called by update_plots()
     
-    def update_constellation_plot_fast(self):
-        """Fast constellation update."""
-        # Use last N points for performance
-        max_points = 500
-        i_data = list(self.plot_data['i_constellation'])[-max_points:]
-        q_data = list(self.plot_data['q_constellation'])[-max_points:]
+    def update_constellation_plot(self):
+        """Update the I/Q constellation plot."""
+        # Get data
+        i_data = list(self.plot_data['i_constellation'])
+        q_data = list(self.plot_data['q_constellation'])
         
+        if not i_data or not q_data:
+            return
+        
+        # Limit points for performance
+        max_points = 500
+        if len(i_data) > max_points:
+            # Take evenly spaced points
+            step = len(i_data) // max_points
+            i_data = i_data[::step]
+            q_data = q_data[::step]
+        
+        # Update scatter plot
+        points = np.column_stack([i_data, q_data])
+        self.constellation_scatter.set_offsets(points)
+        
+        # Color by recency (optional)
+        colors = np.linspace(0.3, 1.0, len(i_data))
+        self.constellation_scatter.set_array(colors)
+        
+        # Auto-scale
         if i_data and q_data:
-            print(f"  - Constellation data: {len(i_data)} points")
-            print(f"  - I range: [{min(i_data):.3f}, {max(i_data):.3f}]")
-            print(f"  - Q range: [{min(q_data):.3f}, {max(q_data):.3f}]")
-            
-            # Update scatter data
-            points = np.column_stack([i_data, q_data])
-            self.constellation_scatter.set_offsets(points)
-            
-            # Color by recency
-            colors = np.linspace(0.3, 1.0, len(i_data))
-            self.constellation_scatter.set_array(colors)
-            
-            # Dynamic limits
-            i_range = max(abs(min(i_data)), abs(max(i_data)), 1) * 1.2
-            q_range = max(abs(min(q_data)), abs(max(q_data)), 1) * 1.2
-            plot_range = max(i_range, q_range)
-            
-            print(f"  - Setting plot range: ±{plot_range:.3f}")
+            i_range = max(abs(min(i_data)), abs(max(i_data)), 0.1)
+            q_range = max(abs(min(q_data)), abs(max(q_data)), 0.1)
+            plot_range = max(i_range, q_range) * 1.2
             self.ax_constellation.set_xlim(-plot_range, plot_range)
             self.ax_constellation.set_ylim(-plot_range, plot_range)
-            
-            # Plot data updated - canvas.draw() will be called by update_plots()
-        else:
-            print("  - No constellation data to plot")
     
-    def update_spectral_plot_fast(self):
-        """Fast spectral update."""
+    def update_spectral_plot(self):
+        """Update the spectral plot."""
         freqs = self.plot_data.get('spec_freqs')
         psd = self.plot_data.get('spec_psd')
         
-        if freqs is not None and psd is not None:
+        if freqs is not None and psd is not None and len(freqs) > 0:
             # Convert to dB
             psd_db = 10 * np.log10(psd + 1e-10)
             
             self.spectral_line.set_data(freqs, psd_db)
             self.ax_spectral.set_xlim(0, max(freqs))
-            self.ax_spectral.set_ylim(np.min(psd_db) - 10, np.max(psd_db) + 10)
-        
-        self.blit_update('spectral')
-    
-    def blit_update(self, plot_name: str):
-        """Efficient blit update for a specific plot."""
-        try:
-            if plot_name in self.backgrounds and plot_name in self.artists:
-                # Restore background
-                self.canvas.restore_region(self.backgrounds[plot_name])
-                
-                # Redraw artists
-                ax = getattr(self, f'ax_{plot_name}')
-                for artist in self.artists[plot_name]:
-                    ax.draw_artist(artist)
-                
-                # Blit the updated region
-                self.canvas.blit(ax.bbox)
-                print(f"Blitted {plot_name} plot")
-            else:
-                print(f"Cannot blit {plot_name} - missing backgrounds or artists")
-                # Fallback to full redraw
-                self.canvas.draw_idle()
-        except Exception as e:
-            print(f"Blit error for {plot_name}: {e}")
-            # Fallback to full redraw
-            self.canvas.draw_idle()
+            
+            if len(psd_db) > 0:
+                y_min = np.min(psd_db) - 10
+                y_max = np.max(psd_db) + 10
+                self.ax_spectral.set_ylim(y_min, y_max)
     
     def start_animation(self):
-        """Start optimized animation."""
-        if self.animation is not None:
-            self.stop_animation()
+        """Start the plot animation."""
+        # Stop any existing animation
+        self.stop_animation()
         
-        try:
-            # Create FuncAnimation when detection starts
-            self.animation = FuncAnimation(
-                self.fig,
-                self.update_plots,
-                interval=50,  # 20 FPS max
-                blit=False,
-                cache_frame_data=False
-            )
-            print("Plot animation started")
-        except Exception as e:
-            print(f"Failed to start animation: {e}")
+        # Create new animation
+        self.animation = FuncAnimation(
+            self.fig, 
+            self.update_plots,
+            interval=100,  # Update every 100ms (10 FPS)
+            blit=False,
+            cache_frame_data=False,
+            save_count=0  # Don't save any frames
+        )
+        
+        print("Plot animation started")
     
     def stop_animation(self):
-        """Stop animation."""
+        """Stop the plot animation."""
         if self.animation is not None:
-            try:
-                self.animation.event_source.stop()
+            self.animation.event_source.stop()
+            if hasattr(self.animation, '_stop'):
                 self.animation._stop()
-                self.animation = None
-                print("Plot animation stopped")
-            except Exception as e:
-                print(f"Error stopping animation: {e}")
-        else:
-            print("No animation to stop")
+            self.animation = None
+            print("Plot animation stopped")
     
     def pack(self, **kwargs):
         """Pack the frame widget."""
         self.frame.pack(**kwargs)
     
     def clear_plots(self):
-        """Clear all plots efficiently."""
+        """Clear all plot data and reset plots."""
+        # Stop animation first
+        was_running = self.animation is not None
+        if was_running:
+            self.stop_animation()
+        
         # Clear data
         for key in self.plot_data:
             if hasattr(self.plot_data[key], 'clear'):
@@ -394,9 +312,19 @@ class PlotManager:
         self.constellation_scatter.set_offsets(np.empty((0, 2)))
         self.spectral_line.set_data([], [])
         
+        # Reset axes limits
+        self.ax_error.set_xlim(0, 100)
+        self.ax_error.set_ylim(0, 0.1)
+        self.ax_detections.set_xlim(0, 100)
+        self.ax_constellation.set_xlim(-4, 4)
+        self.ax_constellation.set_ylim(-4, 4)
+        
         # Redraw
-        self.canvas.draw_idle()
-
+        self.canvas.draw()
+        
+        # Restart animation if it was running
+        if was_running:
+            self.start_animation()
 
 class ConstellationPlot:
     """Standalone constellation plot widget."""

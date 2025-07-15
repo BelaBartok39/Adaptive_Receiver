@@ -109,8 +109,6 @@ class AdaptiveReceiverGUI:
         """Handle incoming data from network."""
         if not self.running:
             return
-        
-        print(f"Received packet with {packet_data['num_samples']} samples")
             
         samples = packet_data['samples']
         if len(samples) > 0:
@@ -119,19 +117,16 @@ class AdaptiveReceiverGUI:
             
             # Get windows from buffer
             windows = self.window_buffer.process_samples(i_data, q_data)
-            print(f"Generated {len(windows)} windows from data")
             
             # Queue windows for GPU processing
             for i_window, q_window in windows:
                 try:
                     self.process_queue.put_nowait((i_window, q_window, packet_data['timestamp']))
-                    print(f"Queued window for processing")
                 except queue.Full:
                     # Drop oldest if queue is full
                     try:
                         self.process_queue.get_nowait()
                         self.process_queue.put_nowait((i_window, q_window, packet_data['timestamp']))
-                        print("Queue full, dropped oldest")
                     except:
                         pass
     
@@ -141,29 +136,15 @@ class AdaptiveReceiverGUI:
         
         # Ensure CUDA context is created in this thread
         if self.detector.device.type == 'cuda':
-            # Extract device index from torch.device object
-            device_index = self.detector.device.index if self.detector.device.index is not None else 0
-            torch.cuda.set_device(device_index)
+            torch.cuda.set_device(self.detector.device)
         
         while self.running:
             try:
                 # Get data from queue with timeout
                 i_window, q_window, timestamp = self.process_queue.get(timeout=0.1)
-                print(f"Processing window in GPU thread: i_shape={i_window.shape}, q_shape={q_window.shape}")
-                print(f"Data ranges: i=[{i_window.min():.3f}, {i_window.max():.3f}], q=[{q_window.min():.3f}, {q_window.max():.3f}]")
-                
-                # Ensure data is not empty and has valid values
-                if len(i_window) == 0 or len(q_window) == 0:
-                    print("Empty window data, skipping")
-                    continue
-                    
-                if np.any(np.isnan(i_window)) or np.any(np.isnan(q_window)):
-                    print("NaN values in window data, skipping")
-                    continue
                 
                 # Process on GPU
                 is_anomaly, confidence, metrics = self.detector.detect(i_window, q_window)
-                print(f"Detection result: anomaly={is_anomaly}, error={metrics['error']:.4f}")
                 
                 # Queue results for GUI update
                 result = {
@@ -177,13 +158,11 @@ class AdaptiveReceiverGUI:
                 
                 try:
                     self.result_queue.put_nowait(result)
-                    print("Queued result for GUI update")
                 except queue.Full:
                     # Drop oldest result
                     try:
                         self.result_queue.get_nowait()
                         self.result_queue.put_nowait(result)
-                        print("Result queue full, dropped oldest")
                     except:
                         pass
                 
@@ -191,14 +170,10 @@ class AdaptiveReceiverGUI:
                 continue
             except Exception as e:
                 print(f"GPU processing error: {e}")
-                import traceback
-                traceback.print_exc()
     
     def schedule_gui_update(self):
         """Schedule periodic GUI updates from main thread."""
-        # Update GUI data only - plots are handled by FuncAnimation
         self.update_gui_from_results()
-        
         # Schedule next update (30 FPS)
         if self.running or self.detector.is_learning:
             self.root.after(33, self.schedule_gui_update)
@@ -216,8 +191,6 @@ class AdaptiveReceiverGUI:
                 result = self.result_queue.get_nowait()
                 results_processed += 1
                 
-                print(f"GUI processing result {results_processed}: error={result['error']:.6f}, anomaly={result['is_anomaly']}")
-                
                 # Update plot data
                 current_time = self.detector.sample_count
                 self.plot_data['time'].append(current_time)
@@ -225,50 +198,22 @@ class AdaptiveReceiverGUI:
                 
                 # Get current threshold
                 threshold = self.detector.threshold_manager.get_threshold()
-                print(f"Current threshold: {threshold}")
-                
                 # Handle learning mode display
                 if threshold == float('inf'):
                     # During learning, show a reasonable threshold for visualization
                     if len(self.plot_data['error']) > 10:
                         recent_errors = list(self.plot_data['error'])[-50:]
-                        if len(recent_errors) > 0 and not all(e == 0 for e in recent_errors):
-                            threshold = np.mean(recent_errors) + 2 * np.std(recent_errors)
-                        else:
-                            threshold = max(result['error'] * 1.5, 0.001)  # Ensure non-zero
+                        threshold = np.mean(recent_errors) + 2 * np.std(recent_errors)
                     else:
-                        threshold = max(result['error'] * 1.5, 0.001)  # Ensure non-zero
+                        threshold = result['error'] * 1.5
                 
                 self.plot_data['threshold'].append(threshold)
                 self.plot_data['detections'].append(result['is_anomaly'])
                 
-                # Update constellation data (less frequently) - fix empty data issue
+                # Update constellation data (less frequently)
                 if self.update_counter % 5 == 0:
-                    i_data = result['i_data']
-                    q_data = result['q_data']
-                    print(f"Updating constellation: i_len={len(i_data)}, q_len={len(q_data)}")
-                    if len(i_data) > 0 and len(q_data) > 0:
-                        print(f"Constellation ranges: i=[{np.min(i_data):.3f}, {np.max(i_data):.3f}], q=[{np.min(q_data):.3f}, {np.max(q_data):.3f}]")
-                        
-                        # Clear old data and add new (deque extend can be problematic with maxlen)
-                        self.plot_data['i_constellation'].clear()
-                        self.plot_data['q_constellation'].clear()
-                        
-                        # Add data in chunks to respect maxlen
-                        max_points = 200  # Match deque maxlen
-                        if len(i_data) > max_points:
-                            # Take the last N points
-                            i_data = i_data[-max_points:]
-                            q_data = q_data[-max_points:]
-                        
-                        # Add one by one to ensure proper deque behavior
-                        for i, q in zip(i_data, q_data):
-                            self.plot_data['i_constellation'].append(i)
-                            self.plot_data['q_constellation'].append(q)
-                        
-                        print(f"Added {len(i_data)} constellation points")
-                    else:
-                        print("Empty constellation data")
+                    self.plot_data['i_constellation'].extend(result['i_data'])
+                    self.plot_data['q_constellation'].extend(result['q_data'])
                 
                 # Handle detection logging
                 if result['is_anomaly'] and not self.detector.is_learning:
@@ -288,21 +233,9 @@ class AdaptiveReceiverGUI:
                 break
             except Exception as e:
                 print(f"GUI update error: {e}")
-                import traceback
-                traceback.print_exc()
                 break
         
         self.update_counter += 1
-        
-        # Debug plot data status every 50 updates
-        if self.update_counter % 50 == 0:
-            print(f"Plot data status:")
-            print(f"  - Time points: {len(self.plot_data['time'])}")
-            print(f"  - Error points: {len(self.plot_data['error'])}")
-            print(f"  - Constellation I: {len(self.plot_data['i_constellation'])}")
-            print(f"  - Constellation Q: {len(self.plot_data['q_constellation'])}")
-            if len(self.plot_data['error']) > 0:
-                print(f"  - Error range: [{min(self.plot_data['error']):.6f}, {max(self.plot_data['error']):.6f}]")
     
     def setup_gui(self):
         """Create and layout GUI components."""
