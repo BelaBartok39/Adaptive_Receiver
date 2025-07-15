@@ -62,10 +62,25 @@ class PlotManager:
         
         # Plot update control
         self.update_counter = 0
-        self.update_interval = 5  # Update every 5 calls to balance performance
+        self.update_interval = 3  # Update every 3 calls for better performance
+        
+        # Performance optimization flags
+        self.last_constellation_update = 0
+        self.last_spectral_update = 0
     
     def setup_plots(self):
         """Initialize all plots with proper formatting."""
+        # Reset tracking variables
+        self._last_detection_count = 0
+        if hasattr(self, 'constellation_scatter_data'):
+            delattr(self, 'constellation_scatter_data')
+        
+        # Clear all axes first to remove old plot elements and legends
+        self.ax_error.clear()
+        self.ax_detections.clear()
+        self.ax_constellation.clear()
+        self.ax_spectral.clear()
+        
         # Error and threshold plot
         self.ax_error.set_title("Reconstruction Error & Detection Threshold", fontsize=12, weight='bold')
         self.ax_error.set_xlabel("Sample Number")
@@ -92,9 +107,9 @@ class PlotManager:
         self.ax_constellation.grid(True, alpha=0.3)
         self.ax_constellation.set_aspect('equal')
         
-        # Constellation scatter plot
+        # Constellation scatter plot - create empty plot
         self.constellation_scatter = self.ax_constellation.scatter(
-            [], [], s=1, alpha=0.6, c='blue', label='Current Signal'
+            [], [], s=1, alpha=0.6, c='blue', label='Signal Points'
         )
         
         # Add constellation reference circles
@@ -102,8 +117,6 @@ class PlotManager:
             circle = patches.Circle((0, 0), radius, fill=False, 
                                   color='gray', alpha=0.3, linestyle='--')
             self.ax_constellation.add_patch(circle)
-        
-        self.ax_constellation.legend(loc='upper right')
         
         # Set initial limits
         self.ax_constellation.set_xlim(-4, 4)
@@ -142,13 +155,34 @@ class PlotManager:
             return []
         
         try:
-            self.update_error_plot()
-            self.update_detection_plot()
-            self.update_constellation_plot()
-            self.update_spectral_plot()
-            # Redraw canvas
-            self.canvas.draw_idle()
-            # Return empty list of artists
+            # Track if any plot actually updated
+            plots_updated = False
+            
+            # Always update error and detection plots (lightweight)
+            if self.plot_data['time'] and self.plot_data['error']:
+                self.update_error_plot()
+                plots_updated = True
+                
+            if self.plot_data['time'] and self.plot_data['detections']:
+                self.update_detection_plot()
+                plots_updated = True
+            
+            # Update expensive plots less frequently
+            if self.update_counter % 15 == 0:  # Every 5th cycle
+                if self.plot_data['i_constellation'] and self.plot_data['q_constellation']:
+                    self.update_constellation_plot()
+                    self.last_constellation_update = self.update_counter
+                    plots_updated = True
+                
+            if self.update_counter % 30 == 0:  # Every 10th cycle  
+                if self.plot_data.get('spec_freqs') is not None and self.plot_data.get('spec_psd') is not None:
+                    self.update_spectral_plot()
+                    self.last_spectral_update = self.update_counter
+                    plots_updated = True
+            
+            # Single canvas update at the end, only if something changed
+            if plots_updated:
+                self.canvas.draw_idle()
             return []
         except Exception as e:
             print(f"Plot update error: {e}")
@@ -198,28 +232,33 @@ class PlotManager:
         time_data = time_data[-n:]
         detection_data = detection_data[-n:]
         
-        # Clear previous detection markers
-        self.ax_detections.clear()
-        
-        # Redraw basic setup
-        self.ax_detections.set_title("Jamming Detection Events", fontsize=12, weight='bold')
-        self.ax_detections.set_xlabel("Sample Number")
-        self.ax_detections.set_ylabel("Detection")
-        self.ax_detections.set_ylim(-0.1, 1.1)
-        self.ax_detections.grid(True, alpha=0.3)
-        self.ax_detections.set_yticks([0, 1])
-        self.ax_detections.set_yticklabels(['Clean', 'Jammed'])
-        
-        # Plot detection events as vertical lines
-        detection_times = [t for t, d in zip(time_data, detection_data) if d]
-        if detection_times:
-            self.ax_detections.vlines(detection_times, 0, 1, 
-                                    colors='red', alpha=0.8, linewidth=2, label='Jamming Detected')
-            self.ax_detections.legend(loc='upper right')
-        
-        # Set x-axis to match error plot
-        if time_data:
-            self.ax_detections.set_xlim(min(time_data), max(time_data))
+        # Only clear and redraw if we don't have existing detection lines or if data structure changed significantly
+        if not hasattr(self, '_last_detection_count') or abs(len(time_data) - self._last_detection_count) > 50:
+            # Clear previous detection markers
+            self.ax_detections.clear()
+            
+            # Redraw basic setup
+            self.ax_detections.set_title("Jamming Detection Events", fontsize=12, weight='bold')
+            self.ax_detections.set_xlabel("Sample Number")
+            self.ax_detections.set_ylabel("Detection")
+            self.ax_detections.set_ylim(-0.1, 1.1)
+            self.ax_detections.grid(True, alpha=0.3)
+            self.ax_detections.set_yticks([0, 1])
+            self.ax_detections.set_yticklabels(['Clean', 'Jammed'])
+            
+            # Plot detection events as vertical lines
+            detection_times = [t for t, d in zip(time_data, detection_data) if d]
+            if detection_times:
+                self.ax_detections.vlines(detection_times, 0, 1, 
+                                        colors='red', alpha=0.8, linewidth=2, label='Jamming Detected')
+                # Only add legend if we have detections
+                self.ax_detections.legend(loc='upper right')
+            
+            # Set x-axis to match error plot
+            if time_data:
+                self.ax_detections.set_xlim(min(time_data), max(time_data))
+            
+            self._last_detection_count = len(time_data)
     
     def update_constellation_plot(self):
         """Update the I/Q constellation plot."""
@@ -230,37 +269,26 @@ class PlotManager:
         q_data = list(self.plot_data['q_constellation'])
         
         # Limit data points for performance (show last N points)
-        max_points = 1000
+        max_points = 500  # Reduced from 1000
         if len(i_data) > max_points:
             i_data = i_data[-max_points:]
             q_data = q_data[-max_points:]
         
-        # Clear previous data
-        self.ax_constellation.clear()
-        
-        # Redraw setup
-        self.ax_constellation.set_title("I/Q Constellation", fontsize=12, weight='bold')
-        self.ax_constellation.set_xlabel("I (In-phase)")
-        self.ax_constellation.set_ylabel("Q (Quadrature)")
-        self.ax_constellation.grid(True, alpha=0.3)
-        self.ax_constellation.set_aspect('equal')
-        
-        # Plot constellation points
-        if i_data and q_data:
-            # Color-code points by recency (newer points are brighter)
-            colors = np.linspace(0.3, 1.0, len(i_data))
-            self.ax_constellation.scatter(i_data, q_data, s=1, alpha=0.6, 
-                                        c=colors, cmap='Blues', label='Signal Points')
-        
-        # Add reference circles
-        for radius in [1, 2, 3]:
-            circle = patches.Circle((0, 0), radius, fill=False, 
-                                  color='gray', alpha=0.3, linestyle='--')
-            self.ax_constellation.add_patch(circle)
-        
-        # Add center lines
-        self.ax_constellation.axhline(y=0, color='gray', alpha=0.3, linestyle='-')
-        self.ax_constellation.axvline(x=0, color='gray', alpha=0.3, linestyle='-')
+        # Update existing scatter plot instead of clearing
+        if hasattr(self, 'constellation_scatter') and hasattr(self, 'constellation_scatter_data'):
+            # Update existing plot data
+            if i_data and q_data:
+                self.constellation_scatter.set_offsets(np.column_stack([i_data, q_data]))
+                # Update colors for recency effect
+                colors = np.linspace(0.3, 1.0, len(i_data))
+                self.constellation_scatter.set_array(colors)
+        else:
+            # First time setup - but don't clear, just update the existing scatter plot
+            if i_data and q_data:
+                self.constellation_scatter.set_offsets(np.column_stack([i_data, q_data]))
+                colors = np.linspace(0.3, 1.0, len(i_data))
+                self.constellation_scatter.set_array(colors)
+                self.constellation_scatter_data = True
         
         # Set appropriate limits based on data
         if i_data and q_data:
@@ -273,34 +301,54 @@ class PlotManager:
             self.ax_constellation.set_xlim(-4, 4)
             self.ax_constellation.set_ylim(-4, 4)
         
-        # Add statistics overlay
-        if i_data and q_data:
+        # Add statistics overlay (less frequently) - but remove old text first
+        if i_data and q_data and self.update_counter % 60 == 0:  # Update stats less often
             i_std = np.std(i_data)
             q_std = np.std(q_data)
             power = np.mean(np.array(i_data)**2 + np.array(q_data)**2)
             
             stats_text = f"I σ: {i_std:.3f}\nQ σ: {q_std:.3f}\nPower: {power:.3f}"
+            # Remove old text if exists
+            for text in self.ax_constellation.texts[:]:  # Use slice to avoid modifying list during iteration
+                if 'σ:' in text.get_text():
+                    text.remove()
+            
             self.ax_constellation.text(0.02, 0.98, stats_text, 
                                      transform=self.ax_constellation.transAxes,
                                      verticalalignment='top',
                                      bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
-        self.ax_constellation.legend(loc='upper right')
     
     def start_animation(self):
         """Start the plot animation."""
-        if self.animation is None:
-            # Start animation without blitting to avoid returning Artist objects
-            self.animation = FuncAnimation(
-                self.fig, self.update_plots,
-                interval=200, blit=False, cache_frame_data=False
-            )
+        # Stop any existing animation first
+        if self.animation is not None:
+            self.stop_animation()
+            
+        # Force initial plot setup
+        self.setup_plots()
+        self.canvas.draw()
+        
+        # Start animation without blitting to avoid returning Artist objects
+        self.animation = FuncAnimation(
+            self.fig, self.update_plots,
+            interval=200, blit=False, cache_frame_data=False
+        )
+        
+        # Force immediate update
+        self.update_plots(0)
     
     def stop_animation(self):
         """Stop the plot animation."""
         if self.animation is not None:
-            self.animation.event_source.stop()
-            self.animation = None
+            try:
+                self.animation.event_source.stop()
+                # Properly dispose of the animation to prevent warnings
+                self.animation._stop()
+            except AttributeError:
+                # Fallback for different matplotlib versions
+                pass
+            finally:
+                self.animation = None
     
     def pack(self, **kwargs):
         """Pack the frame widget."""
@@ -308,12 +356,27 @@ class PlotManager:
     
     def clear_plots(self):
         """Clear all plot data."""
+        # Stop animation first to prevent interference
+        was_running = self.animation is not None
+        if was_running:
+            self.stop_animation()
+        
+        # Clear data buffers
         for key in self.plot_data:
-            self.plot_data[key].clear()
+            if hasattr(self.plot_data[key], 'clear'):
+                self.plot_data[key].clear()
+        
+        # Reset constellation tracking
+        if hasattr(self, 'constellation_scatter_data'):
+            delattr(self, 'constellation_scatter_data')
         
         # Reset plots
         self.setup_plots()
         self.canvas.draw()
+        
+        # Restart animation if it was running
+        if was_running:
+            self.start_animation()
     
     def save_plots(self, filename: str):
         """Save the current plots to file."""

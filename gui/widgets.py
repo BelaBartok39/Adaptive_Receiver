@@ -115,8 +115,12 @@ class ControlPanel(ttk.LabelFrame):
             self.gui.start_learning(duration)
     
     def clear_plots(self):
-        """Clear all plot data."""
-        self.gui.plot_manager.clear_plots()
+        """Clear all plot data (thread-safe)."""
+        # Ensure this runs on the main thread
+        if hasattr(self.gui, 'root'):
+            self.gui.root.after_idle(self.gui.plot_manager.clear_plots)
+        else:
+            self.gui.plot_manager.clear_plots()
     
     def on_detection_started(self):
         """Called when detection starts."""

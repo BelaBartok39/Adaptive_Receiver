@@ -65,6 +65,9 @@ class AdaptiveReceiverGUI:
         self.fps_counter = deque(maxlen=30)
         self.last_fps_time = time.time()
         
+        # Add a counter for throttling expensive updates
+        self.update_counter = 0
+        
         # Setup GUI components
         self.setup_gui()
         
@@ -88,50 +91,8 @@ class AdaptiveReceiverGUI:
                 # Call original processing
                 original_process(i_array, q_array, timestamp)
                 
-                # After processing, update GUI data
-                # The detector's state is updated by the original_process call
-                detector = gui_ref.detector
-                
-                # Get detection results from last detection
-                is_anomaly = False
-                error = 0.0
-                
-                if hasattr(detector, 'detection_history') and len(detector.detection_history) > 0:
-                    last_detection = detector.detection_history[-1]
-                    is_anomaly = last_detection.get('is_anomaly', False)
-                    error = last_detection.get('error', 0.0)
-                
-                # Update plot data
-                current_time = detector.sample_count
-                gui_ref.plot_data['time'].append(current_time)
-                gui_ref.plot_data['error'].append(error)
-                
-                # Get threshold
-                threshold = detector.threshold_manager.get_threshold()
-                if threshold == float('inf'):
-                    threshold = error * 2  # For display during learning
-                gui_ref.plot_data['threshold'].append(threshold)
-                gui_ref.plot_data['detections'].append(is_anomaly)
-                
-                # Update constellation plot with actual I/Q data
-                if len(i_array) > 100:
-                    step = len(i_array) // 100
-                    gui_ref.plot_data['i_constellation'].extend(i_array[::step])
-                    gui_ref.plot_data['q_constellation'].extend(q_array[::step])
-                else:
-                    gui_ref.plot_data['i_constellation'].extend(i_array[:100])  # Limit points
-                    gui_ref.plot_data['q_constellation'].extend(q_array[:100])
-                
-                # Compute spectral data
-                try:
-                    freqs, psd = signal.periodogram(i_array + 1j * q_array, scaling='density')
-                    gui_ref.plot_data['spec_freqs'] = freqs
-                    gui_ref.plot_data['spec_psd'] = psd
-                except Exception as e:
-                    print(f"Spectral calculation error: {e}")
-                
-                # Update performance counter
-                gui_ref.fps_counter.append(time.time())
+                # Schedule GUI update in main thread to avoid race conditions
+                gui_ref.root.after_idle(lambda: gui_ref._update_gui_data(i_array, q_array, timestamp))
                 
             except Exception as e:
                 print(f"GUI hook error: {e}")
@@ -140,6 +101,62 @@ class AdaptiveReceiverGUI:
         
         # Replace the method
         self.simple_detector._process_window = hooked_process
+    
+    def _update_gui_data(self, i_array: np.ndarray, q_array: np.ndarray, timestamp: float):
+        """Thread-safe method to update GUI data from main thread."""
+        try:
+            # After processing, update GUI data
+            # The detector's state is updated by the original_process call
+            detector = self.detector
+            
+            # Get detection results from last detection
+            is_anomaly = False
+            error = 0.0
+            
+            if hasattr(detector, 'detection_history') and len(detector.detection_history) > 0:
+                last_detection = detector.detection_history[-1]
+                is_anomaly = last_detection.get('is_anomaly', False)
+                error = last_detection.get('error', 0.0)
+            
+            # Update plot data
+            current_time = detector.sample_count
+            self.plot_data['time'].append(current_time)
+            self.plot_data['error'].append(error)
+            
+            # Get threshold
+            threshold = detector.threshold_manager.get_threshold()
+            if threshold == float('inf'):
+                threshold = error * 2  # For display during learning
+            self.plot_data['threshold'].append(threshold)
+            self.plot_data['detections'].append(is_anomaly)
+            
+            # --- Performance Throttling ---
+            # Only update expensive plots every N frames
+            if self.update_counter % 20 == 0:  # Reduced frequency further
+                # Update constellation plot with actual I/Q data
+                if len(i_array) > 100:
+                    step = len(i_array) // 100
+                    self.plot_data['i_constellation'].extend(i_array[::step])
+                    self.plot_data['q_constellation'].extend(q_array[::step])
+                else:
+                    self.plot_data['i_constellation'].extend(i_array)
+                    self.plot_data['q_constellation'].extend(q_array)
+
+                # Compute spectral data less frequently
+                try:
+                    # Use simpler windowing for better performance
+                    freqs, psd = signal.periodogram(i_array + 1j * q_array, scaling='density', detrend='constant')
+                    self.plot_data['spec_freqs'] = freqs[::2]  # Downsample frequency bins
+                    self.plot_data['spec_psd'] = psd[::2]
+                except Exception as e:
+                    print(f"Spectral calculation error: {e}")
+
+            # Update performance counter
+            self.fps_counter.append(time.time())
+            self.update_counter += 1
+            
+        except Exception as e:
+            print(f"GUI data update error: {e}")
     
     def setup_gui(self):
         """Create and layout GUI components."""
@@ -161,6 +178,9 @@ class AdaptiveReceiverGUI:
         """Start the detection system."""
         if not self.running:
             self.running = True
+            
+            # Ensure widgets are drawn and layout is calculated
+            self.root.update_idletasks()
             
             # SimpleJammingDetector handles its own threading
             self.simple_detector.start()
@@ -277,26 +297,34 @@ class AdaptiveReceiverGUI:
     
     def on_closing(self):
         """Handle window closing."""
-        # Stop detection if running
+        print("Closing GUI...")
         if self.running:
             self.stop_detection()
         
-        # The SimpleJammingDetector is stopped by stop_detection()
-        
-        # Stop plot animation
-        try:
-            self.plot_manager.stop_animation()
-        except:
-            pass
-        
-        # Destroy window
-        self.root.destroy()
-    
+        # Signal the main loop to exit, allowing for cleanup
+        self.root.quit()
+
     def run(self):
         """Start the GUI main loop."""
         print(f"Adaptive RF Receiver GUI ready on port {self.port}")
         print(f"Device: {self.detector.device}")
-        print("Click 'Start Detection' to begin monitoring")
+        
+        # Auto-start detection after a short delay
+        self.root.after(100, self.start_detection)
         
         # Enter main loop
         self.root.mainloop()
+        
+        # After mainloop exits, we can safely clean up
+        print("GUI mainloop finished. Cleaning up...")
+
+        # Explicitly wait for the detector thread to finish
+        if self.simple_detector and hasattr(self.simple_detector, 'process_thread'):
+             if self.simple_detector.process_thread.is_alive():
+                print("Waiting for detector thread to terminate...")
+                self.simple_detector.process_thread.join(timeout=2.0)
+                if self.simple_detector.process_thread.is_alive():
+                    print("Warning: Detector thread did not terminate gracefully.")
+        
+        self.root.destroy()
+        print("GUI Closed.")
