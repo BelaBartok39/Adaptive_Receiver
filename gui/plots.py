@@ -6,7 +6,7 @@ Uses blitting and efficient updates for better performance.
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.animation import FuncAnimation
+from matplotlib.animation import FuncAnimation  # Keep import to support persistent animation
 import tkinter as tk
 from tkinter import ttk
 import numpy as np
@@ -22,6 +22,7 @@ class PlotManager:
         """Initialize the plot manager."""
         self.parent = parent
         self.plot_data = plot_data
+        # Placeholder for persistent animation
         self.animation = None
         
         # Create main frame
@@ -49,6 +50,9 @@ class PlotManager:
         # Initialize plots
         self.setup_plots()
         
+        # Animation will be created in start_animation()
+        self.animation = None
+        
         # Optimization flags
         self.last_draw_time = 0
         self.min_draw_interval = 0.05  # Max 20 FPS for plots
@@ -56,6 +60,16 @@ class PlotManager:
         # For efficient updates
         self.backgrounds = {}
         self.artists = {}
+        # Create and store FuncAnimation to prevent garbage collection warning
+        try:
+            self.animation = FuncAnimation(
+                self.fig, self.update_plots,
+                interval=50,  # 20 FPS max
+                blit=False,
+                cache_frame_data=False
+            )
+        except Exception as e:
+            print(f"Error creating FuncAnimation: {e}")
     
     def setup_plots(self):
         """Initialize all plots with optimized settings."""
@@ -190,6 +204,12 @@ class PlotManager:
             print(f"Plot update error: {e}")
             import traceback
             traceback.print_exc()
+        finally:
+            # Centralized canvas draw - only one draw call per update cycle
+            try:
+                self.canvas.draw()
+            except Exception as draw_err:
+                print(f"Canvas draw error: {draw_err}")
     
     def update_error_plot_fast(self):
         """Fast error plot update using blitting."""
@@ -222,9 +242,7 @@ class PlotManager:
                     print(f"  - Setting y_max to: {y_max}")
                     self.ax_error.set_ylim(0, y_max)
             
-            # Force canvas draw to ensure visibility
-            print("  - Calling canvas.draw_idle()")
-            self.canvas.draw_idle()
+            # Plot data updated - canvas.draw() will be called by update_plots()
         else:
             print("  - No time data to plot")
     
@@ -253,8 +271,7 @@ class PlotManager:
         if len(time_data) > 1:
             self.ax_detections.set_xlim(time_data[0], time_data[-1])
         
-        # Force canvas draw
-        self.canvas.draw_idle()
+        # Plot data updated - canvas.draw() will be called by update_plots()
     
     def update_constellation_plot_fast(self):
         """Fast constellation update."""
@@ -285,8 +302,7 @@ class PlotManager:
             self.ax_constellation.set_xlim(-plot_range, plot_range)
             self.ax_constellation.set_ylim(-plot_range, plot_range)
             
-            # Force canvas draw
-            self.canvas.draw_idle()
+            # Plot data updated - canvas.draw() will be called by update_plots()
         else:
             print("  - No constellation data to plot")
     
@@ -334,20 +350,31 @@ class PlotManager:
         if self.animation is not None:
             self.stop_animation()
         
-        # Use faster interval since we're rate limiting internally
-        self.animation = FuncAnimation(
-            self.fig, self.update_plots,
-            interval=50,  # 20 FPS max
-            blit=False,  # We handle blitting manually
-            cache_frame_data=False
-        )
+        try:
+            # Create FuncAnimation when detection starts
+            self.animation = FuncAnimation(
+                self.fig,
+                self.update_plots,
+                interval=50,  # 20 FPS max
+                blit=False,
+                cache_frame_data=False
+            )
+            print("Plot animation started")
+        except Exception as e:
+            print(f"Failed to start animation: {e}")
     
     def stop_animation(self):
         """Stop animation."""
         if self.animation is not None:
-            self.animation.event_source.stop()
-            self.animation._stop()
-            self.animation = None
+            try:
+                self.animation.event_source.stop()
+                self.animation._stop()
+                self.animation = None
+                print("Plot animation stopped")
+            except Exception as e:
+                print(f"Error stopping animation: {e}")
+        else:
+            print("No animation to stop")
     
     def pack(self, **kwargs):
         """Pack the frame widget."""

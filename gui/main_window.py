@@ -196,7 +196,9 @@ class AdaptiveReceiverGUI:
     
     def schedule_gui_update(self):
         """Schedule periodic GUI updates from main thread."""
+        # Update GUI data only - plots are handled by FuncAnimation
         self.update_gui_from_results()
+        
         # Schedule next update (30 FPS)
         if self.running or self.detector.is_learning:
             self.root.after(33, self.schedule_gui_update)
