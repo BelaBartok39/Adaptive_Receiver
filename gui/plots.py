@@ -7,9 +7,10 @@ import matplotlib
 # Ensure the TkAgg backend is used for interactive plotting
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
+# Enable interactive mode for matplotlib
+plt.ion()
 import matplotlib.patches as patches
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.animation import FuncAnimation
 import tkinter as tk
 from tkinter import ttk
 import numpy as np
@@ -54,6 +55,7 @@ class PlotManager:
         # Optimization flags
         self.update_counter = 0
         self._update_scheduled = False
+        self._running = False
         self.min_draw_interval_ms = 100  # 10 FPS for plots
         
         # Draw initial empty plots
@@ -117,6 +119,8 @@ class PlotManager:
     
     def update_plots(self, frame=None):
         """Update all plots with current data."""
+        # Debug: update_plots invoked
+        print("[DEBUG] PlotManager.update_plots called")
         if self._update_scheduled:
             return
         self._update_scheduled = True
@@ -269,29 +273,31 @@ class PlotManager:
     
     def start_animation(self):
         """Start the plot animation."""
-        # Stop any existing animation
+        # Stop any existing animation loop
         self.stop_animation()
-        
-        # Create new animation
-        self.animation = FuncAnimation(
-            self.fig, 
-            self.update_plots,
-            interval=100,  # Update every 100ms (10 FPS)
-            blit=False,
-            cache_frame_data=False
-        )
-        
-        print("Plot animation started")
-        # Force initial update and draw to display plots immediately
-        self.update_plots()
-        self.canvas.draw()
+        # Start tkinter-based redraw loop
+        self._running = True
+        print("Plot animation started (tkinter scheduler)")
+        # Kick off first update
+        self._schedule_update()
     
     def stop_animation(self):
         """Stop the plot animation."""
-        if self.animation is not None:
-            self.animation.event_source.stop()
-            self.animation = None
+        if self._running:
+            self._running = False
             print("Plot animation stopped")
+        # Also clear any scheduled update
+        self._update_scheduled = False
+
+    def _schedule_update(self):
+        """Schedule the next plot update via tkinter after."""
+        if not self._running:
+            return
+        # Call update and draw
+        self.update_plots()
+        self.canvas.draw_idle()
+        # Schedule next frame
+        self.parent.after(self.min_draw_interval_ms, self._schedule_update)
     
     def pack(self, **kwargs):
         """Pack the frame widget."""

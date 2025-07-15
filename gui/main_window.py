@@ -188,14 +188,27 @@ class AdaptiveReceiverGUI:
     def schedule_gui_update(self):
         """Schedule periodic GUI updates from main thread."""
         print(f"[DEBUG] schedule_gui_update: running, update_counter={self.update_counter}")
+        # Poll network receiver queue for any missed packets and handle them
+        try:
+            while True:
+                pkt = self.receiver.get_data(timeout=0)
+                if pkt is None:
+                    break
+                self._on_data_received(pkt)
+        except Exception as e:
+            print(f"[DEBUG] schedule_gui_update: error polling receiver: {e}")
         # Update GUI data and plots
         self.update_gui_from_results()
         # Update plots directly in case animation callback fails
         try:
+            # Update and redraw plots immediately
             self.plot_manager.update_plots()
-            self.plot_manager.canvas.draw_idle()
-        except Exception:
-            pass
+            # Force a synchronous draw to ensure canvas is refreshed
+            self.plot_manager.canvas.draw()
+            # Process any pending GUI events to refresh widgets
+            self.root.update_idletasks()
+        except Exception as e:
+            print(f"[DEBUG] schedule_gui_update redraw failed: {e}")
         # Schedule next update (30 FPS)
         if self.running or self.detector.is_learning:
             self.root.after(33, self.schedule_gui_update)
