@@ -18,6 +18,9 @@ from network.receiver import RFDataReceiver
 from core.utils.data_buffer import SlidingWindowBuffer
 from config.config_loader import load_detector_config, load_network_config, load_signal_config
 
+# Import GUI class
+from gui.main_window import AdaptiveReceiverGUI
+
 
 class SimpleJammingDetector:
     """
@@ -135,219 +138,103 @@ class SimpleJammingDetector:
                 # Avoid duplicate detections within 1 second
                 if current_time - self.last_detection_time > 1.0:
                     print(f"\n[{time.strftime('%H:%M:%S')}] JAMMING DETECTED! "
-                          f"Confidence: {confidence:.2f}, Anomaly Score: {metrics['anomaly_score']:.4f}")
-                    
-                    # Log detection details
-                    self._handle_jamming(confidence, metrics)
+                          f"Confidence: {confidence:.2f}, Anomaly Score: {metrics['error']:.4f}")
                     self.last_detection_time = current_time
             
-            # Periodic status update
-            if self.windows_processed % 100 == 0:
+            # Provide status for command-line interface
+            if self.windows_processed % 20 == 0:
                 status = self.detector.get_status()
-                if status['mode'] == 'learning':
-                    print(f"\rLearning: {status['remaining_time']:.1f}s remaining, "
-                          f"Windows: {self.windows_processed}", end='')
+                mode = status.get('mode', 'N/A')
+                if mode == 'learning':
+                    progress = status.get('progress', 0)
+                    print(f"\rLearning... {progress:.1f}% complete", end="")
                 else:
-                    print(f"\rDetection mode - Windows: {self.windows_processed}, "
-                          f"Detections: {status['total_detections']}", end='')
-            
-        except Exception as e:
-            print(f"\nProcessing error: {e}")
-    
-    def _handle_jamming(self, confidence: float, metrics: Dict):
-        """
-        Handle jamming detection.
+                    threshold = self.detector.threshold_manager.get_threshold()
+                    print(f"\rMonitoring... Windows: {self.windows_processed}, "
+                          f"Threshold: {threshold:.4f}", end="")
         
-        In the full implementation, this would:
-        1. Classify the jammer type using DRN
-        2. Scan for clean channels
-        3. Send channel change command to HackRF
+        except Exception as e:
+            print(f"\nError in processing window: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def start(self):
+        """Start the detector."""
+        if not self.running:
+            self.running = True
+            self.receiver.start()
+            self.process_thread = threading.Thread(target=self._process_loop, daemon=True)
+            self.process_thread.start()
+            print("Detector started.")
+
+    def stop(self):
+        """Stop the detector."""
+        if self.running:
+            self.running = False
+            self.receiver.stop()
+            if self.process_thread:
+                self.process_thread.join(timeout=2)
+            print("\nDetector stopped.")
+
+    def _handle_jamming(self, metrics: Dict):
+        """
+        Placeholder for advanced jamming response.
         
         Args:
-            confidence: Detection confidence
-            metrics: Detection metrics
+            metrics: Dictionary of metrics from the detection.
         """
-        print(f"\nJamming characteristics:")
-        print(f"  - Anomaly score: {metrics['anomaly_score']:.4f}")
-        print(f"  - Spectral centroid: {metrics['spectral_centroid']:.2f}")
-        print(f"  - Spectral bandwidth: {metrics['spectral_bandwidth']:.2f}")
-        print(f"  - Frequency offset: {metrics['frequency_offset_normalized']:.4f}")
-        print(f"  - Signal power: {metrics['signal_power_dbm']:.1f} dBm")
-        
-        # TODO: Implement DRN classification
-        # jammer_type = self.drn_classifier.classify(metrics)
-        # print(f"  - Jammer type: {jammer_type}")
-        
-        # TODO: Implement channel scanning
-        # clean_channel = self.channel_scanner.find_clean_channel()
-        # print(f"  - Recommended channel: {clean_channel}")
-        
-        # TODO: Send channel change command
-        # self.send_channel_change(clean_channel)
-    
-    def start(self):
-        """Start the detection system."""
-        self.running = True
-        
-        # Start receiver
-        self.receiver.start()
-        
-        # Start processing thread
-        self.process_thread = threading.Thread(target=self._process_loop, daemon=True)
-        self.process_thread.start()
-        
-        # Start learning phase
-        print("Starting 60-second learning phase...")
-        self.detector.start_learning(duration=60.0)
-        
-        # Main loop for status updates
-        try:
-            while self.running:
-                # Get receiver statistics
-                rx_stats = self.receiver.get_statistics()
-                
-                # Update status display
-                status = self.detector.get_status()
-                
-                if status['mode'] == 'learning':
-                    print(f"\rLearning: {status['remaining_time']:.1f}s remaining | "
-                          f"Packets: {rx_stats['packets_received']} | "
-                          f"Windows: {self.windows_processed}", end='')
-                else:
-                    print(f"\rDetection mode | "
-                          f"Packets: {rx_stats['packets_received']} | "
-                          f"Windows: {self.windows_processed} | "
-                          f"Detections: {status['total_detections']}", end='')
-                
-                time.sleep(0.5)
-                
-        except KeyboardInterrupt:
-            print("\nShutting down...")
-            self.stop()
-    
-    def stop(self):
-        """Stop the detection system."""
-        self.running = False
-        
-        # Stop receiver
-        self.receiver.stop()
-        
-        # Wait for processing thread
-        if self.process_thread:
-            self.process_thread.join(timeout=2.0)
-        
-        # Save model
-        model_path = self.detector.save_model()
-        print(f"Model saved to: {model_path}")
-        
-        # Print final statistics
-        print("\nFinal Statistics:")
-        print(f"  - Windows processed: {self.windows_processed}")
-        print(f"  - Total detections: {self.detector.total_detections}")
-        rx_stats = self.receiver.get_statistics()
-        print(f"  - Packets received: {rx_stats['packets_received']}")
-        print(f"  - Bytes received: {rx_stats['bytes_received']}")
+        # TODO: Implement jammer classification based on metrics
+        # TODO: Implement channel scanning/hopping logic
+        pass
 
 
 def main():
-    """Main entry point."""
+    """Main function to run the detector."""
     import argparse
-    
-    parser = argparse.ArgumentParser(description='Simple RF Jamming Detector using VAE')
-    parser.add_argument('--port', type=int, default=None, 
-                       help='UDP port to listen on (overrides config)')
-    parser.add_argument('--window', type=int, default=None,
-                       help='Window size for processing (overrides config)')
-    parser.add_argument('--config-dir', type=str, default=None,
-                       help='Configuration directory path')
-    parser.add_argument('--gui', action='store_true',
-                       help='Launch with graphical interface')
-    parser.add_argument('--no-gui', action='store_true',
-                       help='Force command-line interface only')
-    parser.add_argument('--model', type=str, default=None,
-                       help='Path to pre-trained model to load')
+    parser = argparse.ArgumentParser(description="Adaptive RF Jamming Detector")
+    parser.add_argument('--gui', action='store_true', help="Run with GUI")
+    parser.add_argument('--port', type=int, help="Override UDP port")
+    parser.add_argument('--learn', type=int, metavar='SECS', help="Run learning mode for SECS seconds, then exit")
     args = parser.parse_args()
-    
-    try:
-        # Initialize detector with config-based settings
-        detector = SimpleJammingDetector(port=args.port, window_size=args.window)
+
+    # Initialize the main detector
+    detector = SimpleJammingDetector(port=args.port)
+
+    if args.gui:
+        # GUI mode
+        print("Starting GUI mode...")
+        # The GUI will take control of the detector
+        gui = AdaptiveReceiverGUI(detector)
+        # The GUI's run() method starts the Tkinter mainloop
+        gui.run()
+        # When the GUI is closed, the detector's stop() method is called by the GUI's on_closing handler
         
-        # Load pre-trained model if specified
-        if args.model:
-            print(f"Loading pre-trained model from {args.model}")
-            detector.detector.load_model(args.model)
+    else:
+        # Command-line mode
+        detector.start()
         
-        print("\nStarting RF Jamming Detector with VAE...")
-        print("Press Ctrl+C to stop")
-        print("-" * 50)
-        
-        # Choose interface mode
-        if args.gui and not args.no_gui:
-            # Launch GUI
+        if args.learn:
+            print(f"Starting learning phase for {args.learn} seconds...")
+            detector.detector.start_learning(args.learn)
             try:
-                from gui.main_window import AdaptiveReceiverGUI
-                
-                print("Launching GUI interface...")
-                
-                # Create a wrapper that makes SimpleJammingDetector compatible with GUI
-                class DetectorWrapper:
-                    def __init__(self, simple_detector):
-                        self.detector = simple_detector.detector
-                        self.port = simple_detector.port
-                        self.simple_detector = simple_detector
-                        self.window_size = simple_detector.window_size
-                        
-                        # The simple detector is already initialized and will handle everything
-                        self.running = True
-                        
-                    def start(self):
-                        """Start the detector in background thread."""
-                        self.receive_thread = threading.Thread(
-                            target=self._run_detector, 
-                            daemon=True
-                        )
-                        self.receive_thread.start()
-
-                    def _run_detector(self):
-                        """Run the detector in background."""
-                        try:
-                            self.simple_detector.start()
-                        except Exception as e:
-                            print(f"Detector error: {e}")
-                            import traceback
-                            traceback.print_exc()
-                
-                # Create wrapper and GUI
-                wrapper = DetectorWrapper(detector)
-                gui = AdaptiveReceiverGUI(
-                    wrapper,
-                    window_title="RF Jamming Detector with VAE"
-                )
-                
-                # Start the GUI main loop
-                gui.run()
-                
-            except ImportError as e:
-                print(f"GUI not available: {e}")
-                print("Falling back to command-line interface...")
-                detector.start()
+                time.sleep(args.learn)
+            except KeyboardInterrupt:
+                print("\nLearning interrupted.")
+            finally:
+                stats = detector.detector.stop_learning()
+                print("\nLearning complete.")
+                print(f"  - Samples processed: {stats['samples_processed']}")
+                print(f"  - Final threshold: {stats['final_threshold']:.4f}")
+                detector.stop()
         else:
-            # Command-line interface
-            detector.start()
-        
-    except FileNotFoundError as e:
-        print(f"Configuration file not found: {e}")
-        print("Make sure you're running from the correct directory with config files.")
-    except KeyboardInterrupt:
-        print("\nShutdown requested...")
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        if 'detector' in locals():
-            detector.stop()
-
+            print("Running in command-line mode. Press Ctrl+C to stop.")
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nShutting down...")
+            finally:
+                detector.stop()
 
 if __name__ == "__main__":
     main()
