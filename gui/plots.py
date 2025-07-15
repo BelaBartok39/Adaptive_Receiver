@@ -3,6 +3,9 @@ Optimized matplotlib plotting for the Adaptive RF Receiver GUI.
 Fixed animation and data display issues.
 """
 
+import matplotlib
+# Ensure the TkAgg backend is used for interactive plotting
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -279,6 +282,9 @@ class PlotManager:
         )
         
         print("Plot animation started")
+        # Force initial update and draw to display plots immediately
+        self.update_plots()
+        self.canvas.draw()
     
     def stop_animation(self):
         """Stop the plot animation."""

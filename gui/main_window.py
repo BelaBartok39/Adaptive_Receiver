@@ -8,6 +8,7 @@ from tkinter import ttk
 import tkinter.messagebox
 import tkinter.filedialog
 import numpy as np
+import torch
 import threading
 import queue
 import time
@@ -38,6 +39,8 @@ class AdaptiveReceiverGUI:
             window_size: Size of processing windows (overrides config)
             auto_start: If True, detection starts automatically when GUI launches.
         """
+        # Store auto-start flag
+        self.auto_start = auto_start
         # Load configurations
         self.network_config = load_network_config()
         self.signal_config = load_signal_config()
@@ -99,12 +102,17 @@ class AdaptiveReceiverGUI:
         
         # Setup GUI components
         self.setup_gui()
+        # Schedule auto-start of detection if configured
+        if self.auto_start:
+            self.root.after(100, self.start_detection)
         
         # Start periodic GUI update
         self.update_counter = 0
         self.schedule_gui_update()
         
         print("GUI initialized and ready")
+        # Start plot animation so canvas is active
+        self.plot_manager.start_animation()
     
     def _on_data_received(self, packet_data: Dict):
         """Handle incoming data from network."""
@@ -177,7 +185,14 @@ class AdaptiveReceiverGUI:
     
     def schedule_gui_update(self):
         """Schedule periodic GUI updates from main thread."""
+        # Update GUI data and plots
         self.update_gui_from_results()
+        # Update plots directly in case animation callback fails
+        try:
+            self.plot_manager.update_plots()
+            self.plot_manager.canvas.draw_idle()
+        except Exception:
+            pass
         # Schedule next update (30 FPS)
         if self.running or self.detector.is_learning:
             self.root.after(33, self.schedule_gui_update)
@@ -414,9 +429,8 @@ class AdaptiveReceiverGUI:
         """Start the GUI main loop."""
         print(f"Adaptive RF Receiver GUI ready on port {self.port}")
         print(f"Device: {self.detector.device}")
-        
         # Optionally auto-start detection (configurable)
-        if getattr(self, 'auto_start', True):
+        if self.auto_start:
             self.root.after(100, self.start_detection)
         
         # Run main loop
