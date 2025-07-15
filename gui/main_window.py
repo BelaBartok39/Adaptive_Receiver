@@ -118,7 +118,9 @@ class AdaptiveReceiverGUI:
         """Handle incoming data from network."""
         if not self.running:
             return
-            
+        # Debug: data reception callback invoked
+        print(f"[DEBUG] GUI _on_data_received: received {len(packet_data['samples'])} samples")
+        
         samples = packet_data['samples']
         if len(samples) > 0:
             i_data = samples[:, 0]
@@ -185,6 +187,7 @@ class AdaptiveReceiverGUI:
     
     def schedule_gui_update(self):
         """Schedule periodic GUI updates from main thread."""
+        print(f"[DEBUG] schedule_gui_update: running, update_counter={self.update_counter}")
         # Update GUI data and plots
         self.update_gui_from_results()
         # Update plots directly in case animation callback fails
@@ -201,6 +204,8 @@ class AdaptiveReceiverGUI:
     
     def update_gui_from_results(self):
         """Update GUI with processing results (main thread only)."""
+        # Debug: start processing GUI results
+        print("[DEBUG] update_gui_from_results: starting cycle")
         # Process all available results
         results_processed = 0
         max_results = 10  # Limit per update cycle
@@ -254,6 +259,8 @@ class AdaptiveReceiverGUI:
                 print(f"GUI update error: {e}")
                 break
         
+        # Debug: finished processing GUI results
+        print(f"[DEBUG] update_gui_from_results: processed {results_processed} results")
         self.update_counter += 1
     
     def setup_gui(self):
@@ -272,6 +279,7 @@ class AdaptiveReceiverGUI:
     
     def start_detection(self):
         """Start the detection system."""
+        print("[DEBUG] start_detection called")
         if not self.running:
             self.running = True
             
