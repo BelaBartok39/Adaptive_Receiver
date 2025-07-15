@@ -98,8 +98,14 @@ class AdaptiveReceiverGUI:
     
     def _setup_simple_detector_hooks(self):
         """Hook into SimpleJammingDetector's processing pipeline."""
-        # Store original process_window method
-        original_process_window = self.simple_detector._process_window
+        # Store original process_window method (robustly detect name)
+        orig = getattr(self.simple_detector, '_process_window', None)
+        if orig is None:
+            orig = getattr(self.simple_detector, 'process_window', None)
+        if orig is None:
+            print("No process_window method found on detector wrapper; GUI hooks disabled.")
+            return
+        original_process_window = orig
 
         def hooked_process_window():
             """Hooked version that updates GUI plots after processing."""

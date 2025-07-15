@@ -283,68 +283,21 @@ def main():
         
         # Choose interface mode
         if args.gui and not args.no_gui:
-            # Launch GUI
             try:
+                from core.detection.anomaly_detector import AnomalyDetector
                 from gui.main_window import AdaptiveReceiverGUI
-                
-                print("Launching GUI interface...")
-                
-                # Create a wrapper that makes SimpleJammingDetector compatible with GUI
-                class DetectorWrapper:
-                    def __init__(self, simple_detector):
-                        self.detector = simple_detector.detector
-                        self.port = simple_detector.port
-                        self.simple_detector = simple_detector
-                        
-                        # Make the detector compatible with GUI expectations
-                        self.window_size = simple_detector.window_size
-                        self.i_buffer = []
-                        self.q_buffer = []
-                        
-                        # Hook into data processing
-                        original_process = simple_detector._process_window
-                        
-                        def hooked_process(i_array, q_array, timestamp):
-                            # Store for GUI
-                            self.i_buffer = list(i_array)
-                            self.q_buffer = list(q_array)
-                            
-                            # Call original
-                            result = original_process(i_array, q_array, timestamp)
-                            
-                            # Store results for GUI
-                            if hasattr(simple_detector.detector, 'last_is_anomaly'):
-                                self.detector.last_is_anomaly = simple_detector.detector.last_is_anomaly
-                            if hasattr(simple_detector.detector, 'last_error'):
-                                self.detector.last_error = simple_detector.detector.last_error
-                            
-                            return result
-                        
-                        simple_detector._process_window = hooked_process
-                        
-                        # Start the detector
-                        self.running = True
-                        self.receive_thread = threading.Thread(
-                            target=self._run_detector, 
-                            daemon=True
-                        )
-                        self.receive_thread.start()
-                    
-                    def _run_detector(self):
-                        """Run the detector in background."""
-                        self.simple_detector.start()
-                
-                # Create wrapper and GUI
-                wrapper = DetectorWrapper(detector)
-                gui = AdaptiveReceiverGUI(
-                    wrapper,
-                    window_title="RF Jamming Detector with VAE"
+
+                print("Launching GUI interface with raw detector...")
+                # Create a raw AnomalyDetector and pass to GUI
+                raw_detector = AnomalyDetector(
+                    window_size=args.window if args.window else detector.window_size,
+                    config=detector.detector_config
                 )
-                
-                # Start the GUI main loop
+                gui = AdaptiveReceiverGUI(raw_detector, port=args.port)
+                # Start GUI-managed detection (it handles its own receive loop)
+                gui.start_detection()
                 gui.run()
-                
-            except ImportError as e:
+            except Exception as e:
                 print(f"GUI not available: {e}")
                 print("Falling back to command-line interface...")
                 detector.start()
