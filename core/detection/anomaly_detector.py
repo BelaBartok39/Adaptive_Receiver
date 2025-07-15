@@ -151,16 +151,8 @@ class AnomalyDetector:
             spectral_error = torch.mean(torch.abs(orig_fft - recon_fft))
             
             # Use mean absolute error and compute deviation from training baseline
-            raw_mae = mae_error.item()
-            if self.is_learning:
-                # During learning, track raw MAE
-                error = raw_mae
-            else:
-                # Compute baseline MAE from training errors
-                from numpy import mean
-                baseline = mean(list(self.threshold_manager.learning_errors)) if self.threshold_manager.learning_errors else raw_mae
-                # Error is deviation from baseline
-                error = abs(raw_mae - baseline)
+            # Use mean absolute error directly for detection
+            error = mae_error.item()
         
         # Update threshold manager
         self.threshold_manager.update(error, self.is_learning)

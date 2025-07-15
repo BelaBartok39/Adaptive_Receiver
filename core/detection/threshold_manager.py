@@ -46,15 +46,8 @@ class DynamicThresholdManager:
         return {
             # Use lower percentile and margin for more sensitivity
             'base_percentile': 95.0,
-            'adaptation_rate': 0.01,
-            # Require fewer samples before threshold becomes active
-            'min_samples': 50,
-            # Increase EMA alpha for faster adaptation
-            'ema_alpha': 0.1,
-            # Remove extra margin to follow waveform closely
-            'safety_margin': 1.0,
-            # Allow threshold to adapt down to half of stable value
-            'min_threshold_ratio': 0.5
+            # Threshold uses percentile of training errors
+            'safety_margin': 1.0
         }
     
     def update(self, error: float, is_learning: bool = False) -> None:
@@ -82,43 +75,10 @@ class DynamicThresholdManager:
         Returns:
             Current threshold value
         """
-        if len(self.errors) < self.config['min_samples']:
+        # Only return a threshold after learning completes and stable_threshold is set
+        if self.is_learning or self.stable_threshold is None:
             return float('inf')
-        
-        # During learning, use high percentile with margin
-        if self.is_learning:
-            if len(self.learning_errors) > 50:
-                threshold = np.percentile(
-                    self.learning_errors, 
-                    self.config['base_percentile']
-                )
-                self.stable_threshold = threshold * self.config['safety_margin']
-                return self.stable_threshold
-            return float('inf')
-        
-        # During detection, use adaptive threshold
-        if self.stable_threshold is None:
-            return float('inf')
-        
-        # Calculate EMA threshold for smooth adaptation
-        recent_high = np.percentile(
-            list(self.errors)[-100:], 
-            95
-        )
-        
-        if self.ema_threshold is None:
-            self.ema_threshold = self.stable_threshold
-        else:
-            # Exponential moving average
-            alpha = self.config['ema_alpha']
-            self.ema_threshold = (
-                (1 - alpha) * self.ema_threshold + 
-                alpha * recent_high * 1.3
-            )
-        
-        # Ensure threshold doesn't drop too low
-        min_threshold = self.stable_threshold * self.config['min_threshold_ratio']
-        return max(self.ema_threshold, min_threshold)
+        return self.stable_threshold
     
     def get_statistics(self) -> Dict[str, float]:
         """
@@ -164,10 +124,20 @@ class DynamicThresholdManager:
         Args:
             is_learning: Whether to enable learning mode
         """
+        # Enter or exit learning mode
         self.is_learning = is_learning
-        if not is_learning and self.stable_threshold is None:
-            # Force threshold calculation if transitioning from learning
-            _ = self.get_threshold()
+        if not is_learning:
+            # Compute detection threshold from training errors
+            import numpy as _np
+            errs = _np.array(self.learning_errors)
+            if errs.size > 0:
+                mean_err = _np.mean(errs)
+                std_err = _np.std(errs)
+                margin = self.config.get('safety_margin', 1.5)
+                self.stable_threshold = mean_err + margin * std_err
+            else:
+                self.stable_threshold = None
+        self.is_learning = is_learning
     
     def get_confidence(self, error: float) -> float:
         """
