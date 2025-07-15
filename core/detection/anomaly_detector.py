@@ -5,7 +5,11 @@ Fixed to properly detect anomalies after learning phase.
 
 import torch
 import torch.optim as optim
-from torch.cuda.amp import autocast, GradScaler
+try:
+    from torch.amp import autocast, GradScaler
+except ImportError:
+    # Fallback for older PyTorch versions
+    from torch.cuda.amp import autocast, GradScaler
 import numpy as np
 from pathlib import Path
 from datetime import datetime
@@ -51,7 +55,18 @@ class AnomalyDetector:
             self.model.parameters(),
             lr=self.config['training']['learning_rate']
         )
-        self.scaler = GradScaler() if self.device.type == 'cuda' else None
+        
+        # Use new GradScaler API to avoid deprecation warning
+        if self.device.type == 'cuda':
+            try:
+                from torch.amp import GradScaler
+                self.scaler = GradScaler('cuda')
+            except ImportError:
+                # Fallback for older PyTorch versions
+                from torch.cuda.amp import GradScaler
+                self.scaler = GradScaler()
+        else:
+            self.scaler = None
         
         # State tracking
         self.is_learning = False
@@ -142,8 +157,15 @@ class AnomalyDetector:
         # Get model output
         with torch.no_grad():
             if self.device.type == 'cuda':
-                with autocast():
-                    anomaly_score = self.model.get_anomaly_score(iq_tensor)
+                try:
+                    from torch.amp import autocast
+                    with autocast('cuda'):
+                        anomaly_score = self.model.get_anomaly_score(iq_tensor)
+                except ImportError:
+                    # Fallback for older PyTorch versions
+                    from torch.cuda.amp import autocast
+                    with autocast():
+                        anomaly_score = self.model.get_anomaly_score(iq_tensor)
             else:
                 anomaly_score = self.model.get_anomaly_score(iq_tensor)
         
@@ -216,10 +238,19 @@ class AnomalyDetector:
         self.model.train()
         
         if self.device.type == 'cuda' and self.scaler:
-            with autocast():
-                reconstruction, mu, logvar = self.model(batch)
-                loss_dict = self.model.loss_function(batch, reconstruction, mu, logvar)
-                loss = loss_dict['loss']
+            try:
+                from torch.amp import autocast
+                with autocast('cuda'):
+                    reconstruction, mu, logvar = self.model(batch)
+                    loss_dict = self.model.loss_function(batch, reconstruction, mu, logvar)
+                    loss = loss_dict['loss']
+            except ImportError:
+                # Fallback for older PyTorch versions
+                from torch.cuda.amp import autocast
+                with autocast():
+                    reconstruction, mu, logvar = self.model(batch)
+                    loss_dict = self.model.loss_function(batch, reconstruction, mu, logvar)
+                    loss = loss_dict['loss']
             
             # Backward pass with mixed precision
             self.optimizer.zero_grad()

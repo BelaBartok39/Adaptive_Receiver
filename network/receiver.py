@@ -75,16 +75,21 @@ class RFDataReceiver:
     
     def _receive_loop(self):
         """Main receive loop."""
+        print(f"Starting receive loop on port {self.port}")
         while self.running:
             try:
                 data, addr = self.socket.recvfrom(self.buffer_size)
+                print(f"Received {len(data)} bytes from {addr}")
                 
                 if len(data) >= 20:  # Minimum packet size
                     self._process_packet(data)
+                else:
+                    print(f"Packet too small: {len(data)} bytes")
                     
             except socket.timeout:
                 continue
             except Exception as e:
+                print(f"Receive error: {e}")
                 logger.error(f"Receive error: {e}")
     
     def _process_packet(self, data: bytes):
@@ -140,9 +145,13 @@ class RFDataReceiver:
             
             # Call callback if provided
             if self.callback:
+                print(f"Calling callback with {len(samples)} samples")
                 self.callback(packet_data)
+            else:
+                print("No callback defined")
                 
         except Exception as e:
+            print(f"Packet processing error: {e}")
             logger.error(f"Packet processing error: {e}")
     
     def get_data(self, timeout: float = 0.1) -> Optional[dict]:

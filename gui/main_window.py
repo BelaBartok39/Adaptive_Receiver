@@ -109,6 +109,8 @@ class AdaptiveReceiverGUI:
         """Handle incoming data from network."""
         if not self.running:
             return
+        
+        print(f"Received packet with {packet_data['num_samples']} samples")
             
         samples = packet_data['samples']
         if len(samples) > 0:
@@ -117,16 +119,19 @@ class AdaptiveReceiverGUI:
             
             # Get windows from buffer
             windows = self.window_buffer.process_samples(i_data, q_data)
+            print(f"Generated {len(windows)} windows from data")
             
             # Queue windows for GPU processing
             for i_window, q_window in windows:
                 try:
                     self.process_queue.put_nowait((i_window, q_window, packet_data['timestamp']))
+                    print(f"Queued window for processing")
                 except queue.Full:
                     # Drop oldest if queue is full
                     try:
                         self.process_queue.get_nowait()
                         self.process_queue.put_nowait((i_window, q_window, packet_data['timestamp']))
+                        print("Queue full, dropped oldest")
                     except:
                         pass
     
@@ -136,15 +141,19 @@ class AdaptiveReceiverGUI:
         
         # Ensure CUDA context is created in this thread
         if self.detector.device.type == 'cuda':
-            torch.cuda.set_device(self.detector.device)
+            # Extract device index from torch.device object
+            device_index = self.detector.device.index if self.detector.device.index is not None else 0
+            torch.cuda.set_device(device_index)
         
         while self.running:
             try:
                 # Get data from queue with timeout
                 i_window, q_window, timestamp = self.process_queue.get(timeout=0.1)
+                print(f"Processing window in GPU thread")
                 
                 # Process on GPU
                 is_anomaly, confidence, metrics = self.detector.detect(i_window, q_window)
+                print(f"Detection result: anomaly={is_anomaly}, error={metrics['error']:.4f}")
                 
                 # Queue results for GUI update
                 result = {
@@ -158,11 +167,13 @@ class AdaptiveReceiverGUI:
                 
                 try:
                     self.result_queue.put_nowait(result)
+                    print("Queued result for GUI update")
                 except queue.Full:
                     # Drop oldest result
                     try:
                         self.result_queue.get_nowait()
                         self.result_queue.put_nowait(result)
+                        print("Result queue full, dropped oldest")
                     except:
                         pass
                 
@@ -170,6 +181,8 @@ class AdaptiveReceiverGUI:
                 continue
             except Exception as e:
                 print(f"GPU processing error: {e}")
+                import traceback
+                traceback.print_exc()
     
     def schedule_gui_update(self):
         """Schedule periodic GUI updates from main thread."""
